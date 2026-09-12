@@ -370,18 +370,38 @@ real work and it will not always succeed.
 
 ### So classify the tools
 
-| class | examples | protection |
-|---|---|---|
-| pure read | `cat`, `grep`, search, `GET` | retry freely |
-| idempotent write | `PUT` state, conditional update with a version | idempotency token or compare-and-set |
-| irreversible external effect | send mail, create PR, charge a card, deploy | must not be guessed at by the runtime |
+Classify by **retry semantics**, not by what the tool does. Four classes,
+because "idempotent" covers two quite different engineering costs:
 
-For the third class the tool **service** carries `operation_id`, and the effect
-is executed by a guarded service rather than by the sandbox reaching the outside
-world directly. Which is the principle worth stating in one line:
+```text
+Read-only
+    GET / search / cat
+    → normally safe to retry
 
-> **Don't give arbitrary agents raw credentials to perform irreversible side
-> effects directly. Route consequential actions through a guarded tool layer.**
+Naturally idempotent
+    PUT desired-state operations
+    → retry using conditional writes / versioning
+
+Idempotency-aware
+    create operation with operation_id
+    → the tool service deduplicates
+
+Non-idempotent irreversible
+    send email / payment / production deploy
+    → explicit reconciliation or human approval may be required
+```
+
+The third class is idempotent **because we built it that way**; the second is
+idempotent by the shape of the operation. Conflating them hides the cost: the
+third requires a durable dedup store and an owner, the second requires only a
+version check.
+
+For the fourth class the effect is executed by a guarded service rather than by
+the sandbox reaching the outside world directly:
+
+> **Do not give arbitrary agents direct access to irreversible side effects when
+> the underlying system cannot provide usable retry semantics. Route
+> consequential actions through a guarded effect layer.**
 
 For the third class: record the intent in durable storage **before** performing
 the effect, keyed by the deterministic tuple above. On resume, the platform
@@ -408,7 +428,48 @@ Consequences:
 
 ---
 
-## 9. Checkpoints: how much work is lost, and how often to pay
+## 9. The four layers, and what each one is for
+
+The split-brain case pulled in four mechanisms. They are easy to blur together
+and they solve **different problems** — being able to separate them cleanly is
+most of the value of this section.
+
+```text
+Lease
+    → defines temporary execution ownership
+
+Fencing generation
+    → prevents stale durable writes
+
+Idempotency / effect service
+    → controls duplicate external side effects
+
+Self-fencing
+    → stops stale execution quickly and reduces waste
+```
+
+Said as a sentence:
+
+> A **lease** tells the system who should own execution right now. **Fencing**
+> stops a former owner from corrupting the new owner's state. **Idempotency**
+> handles the effects that already crossed the system boundary, where fencing
+> cannot reach. **Self-fencing** only stops the old worker sooner.
+
+The ordering is not arbitrary. Each layer catches what the one above it cannot:
+
+| | catches | cannot catch |
+|---|---|---|
+| lease | a dead worker | a live partitioned one |
+| fencing | its writes to our stores | what it already sent outside |
+| idempotency | duplicate external effects | effects the provider cannot deduplicate |
+| self-fencing | continued waste | anything, as a correctness claim |
+
+And the bottom row is the trap: **self-fencing is the only one of the four that
+is not a correctness mechanism**, and it is the one that looks most like a fix.
+
+---
+
+## 10. Checkpoints: how much work is lost, and how often to pay
 
 Recovery is only cheap if there is something to recover to.
 
@@ -476,7 +537,7 @@ the same boundary.
 
 ---
 
-## 10. Placement: which worker, actually
+## 11. Placement: which worker, actually
 
 The naive loop:
 
@@ -511,7 +572,7 @@ decision that leans on a duration estimate will be wrong often enough to matter.
 
 ---
 
-## 11. Scheduler durability and leader election
+## 12. Scheduler durability and leader election
 
 Two questions hide here: *is the scheduler stateful*, and *what happens when it
 dies*.
@@ -565,7 +626,7 @@ bad; stalling ten thousand jobs because a Kafka broker is unhappy is worse.
 
 ---
 
-## 12. Why the job store is the queue
+## 13. Why the job store is the queue
 
 The natural question: *why not Kafka or SQS?*
 
@@ -593,7 +654,7 @@ SELECT job_id FROM jobs
 
 ---
 
-## 13. Admission, fairness, and preemption
+## 14. Admission, fairness, and preemption
 
 ### Admission
 
@@ -645,7 +706,7 @@ jobs; let running ones finish, because they hold the expensive state.
 
 ---
 
-## 14. "Why not the Kubernetes scheduler?"
+## 15. "Why not the Kubernetes scheduler?"
 
 Very likely to be asked. The answer that fails is *Kubernetes is not good
 enough*. The answer that works:
@@ -683,7 +744,7 @@ and it is also what real platforms do.
 
 ---
 
-## 15. What breaks at 100×
+## 16. What breaks at 100×
 
 The best question in this section, and the answer is not "more workers".
 
@@ -731,7 +792,7 @@ naming the others instead — is the differentiator.
 
 ---
 
-## 16. The one diagram to memorise
+## 17. The one diagram to memorise
 
 If only one thing gets drawn, draw this. The horizontal rule is the argument.
 
@@ -782,7 +843,7 @@ before they are asked.
 
 ---
 
-## 17. Saying it out loud
+## 18. Saying it out loud
 
 > **"A worker running a two-hour coding agent stops heartbeating. Walk me
 > through exactly what happens."**
@@ -811,7 +872,7 @@ rather than read about it.
 
 ---
 
-## 18. Numbers to have ready
+## 19. Numbers to have ready
 
 ```text
 lease duration            30 s
@@ -827,32 +888,7 @@ heartbeat writes          1K/s at 10K jobs, per-job lease
 
 ---
 
-## 19. Rehearsal — answer each in 60 seconds
-
-1. Why a lease rather than assignment with acknowledgement?
-2. Your lease expired but the worker is alive and still running. What happens?
-3. What exactly does a fencing token protect, and what does it not protect?
-4. Do you need leader election for the scheduler? Argue both sides.
-5. Why is the job table a better queue than Kafka here, and when does that flip?
-6. A tool call has a non-idempotent side effect and the job is retried. Now what?
-7. Why is resume-from-checkpoint not the same as replay?
-8. The model service slows down. Trace what happens to the scheduler if nothing
-   connects the two.
-9. At 100× scale, what breaks first? Not sandboxes — why not?
-10. How long is a job unavailable after its worker dies, and which term dominates?
-11. Why not the Kubernetes scheduler?
-12. Which worker do you place a job on, and when does a smaller worker win?
-13. How often do you checkpoint, and what is the tradeoff you are balancing?
-14. Why can an idempotency key not be derived from trajectory position?
-15. A third-party effect supports neither idempotency nor transactions. Now what?
-16. Is self-fencing a correctness mechanism? Defend the answer.
-
-If all ten come out fluently, this section is done. Move to the next deep dive
-rather than polishing this one.
-
----
-
-## 20. The hardest version: an effect that cannot be made idempotent
+## 20. Exactly-once external effects are impossible without cooperation
 
 > **The agent calls `send_email()`. The provider supports no idempotency key and
 > no transactions. Worker A calls it successfully and crashes before persisting
@@ -929,7 +965,7 @@ built to handle it**, rather than something every agent step must reason about.
 ### 5. The ordering rule this depends on
 
 The reason B saw "not sent" is that the checkpoint predates the effect and was
-never updated. So: **checkpoint immediately before a side effect** (§9), and
+never updated. So: **checkpoint immediately before a side effect** (§10), and
 make the intent record durable before the call. That is what makes the recovery
 boundary and the idempotency boundary the same boundary — otherwise the state B
 wakes into and the state the intent log describes disagree.
@@ -945,3 +981,30 @@ window no design removes. Two things can be done and neither is elimination:
 
 If asked to reduce it further, the answer is to move the effect out of the agent
 loop entirely (§4 above), not to add another protocol inside it.
+
+---
+
+## 21. Rehearsal — answer each in 60 seconds
+
+1. Why a lease rather than assignment with acknowledgement?
+2. Your lease expired but the worker is alive and still running. What happens?
+3. What exactly does a fencing token protect, and what does it not protect?
+4. Do you need leader election for the scheduler? Argue both sides.
+5. Why is the job table a better queue than Kafka here, and when does that flip?
+6. A tool call has a non-idempotent side effect and the job is retried. Now what?
+7. Why is resume-from-checkpoint not the same as replay?
+8. The model service slows down. Trace what happens to the scheduler if nothing
+   connects the two.
+9. At 100× scale, what breaks first? Not sandboxes — why not?
+10. How long is a job unavailable after its worker dies, and which term dominates?
+11. Why not the Kubernetes scheduler?
+12. Which worker do you place a job on, and when does a smaller worker win?
+13. How often do you checkpoint, and what is the tradeoff you are balancing?
+14. Why can an idempotency key not be derived from trajectory position?
+15. A third-party effect supports neither idempotency nor transactions. Now what?
+16. Is self-fencing a correctness mechanism? Defend the answer.
+
+If all ten come out fluently, this section is done. Move to the next deep dive
+rather than polishing this one.
+
+---
