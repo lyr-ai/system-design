@@ -763,6 +763,8 @@ restore                   base blob + ≤ N deltas, N bounded by re-basing
 23. Name the three orderings and say which one may go backwards.
 24. Checkpoint lineage is a tree. What does that change about GC?
 25. A stale branch got further than the live one. Adopt it? Justify.
+26. Name the three "latests" and give a legal state where all three differ.
+27. Why should a long-running agent job not report a completion percentage?
 
 ---
 
@@ -1071,3 +1073,103 @@ the attempt:
 
 The second is the one to avoid, and noticing it before the interviewer does is
 the point of this section.
+
+---
+
+## 25. Name it `recovery_head`, not `latest_checkpoint`
+
+The name is doing damage. `latest_checkpoint` invites the reading *the
+checkpoint with the largest step*, which is exactly the stale-branch adoption
+§24 forbids.
+
+```text
+RecoveryHead {
+  job_id
+  current_generation
+  checkpoint_id
+}
+```
+
+> **the latest durable point the current legitimate execution lineage should
+> resume from** — not the furthest checkpoint that has ever existed.
+
+Lease transfer then reads as a single sequence, and the lineage is explicit at
+every step:
+
+```text
+lease transfer
+      ↓
+select recovery point C95
+      ↓
+create generation 9, record resume_from_checkpoint = C95
+      ↓
+gen 9 resumes from C95
+      ↓
+C96 committed
+      ↓
+recovery_head = C96
+```
+
+### There are three "latests" and they are different things
+
+```text
+latest by ownership          the highest valid generation          = 9
+latest durable recovery      recovery_head                         = step 106
+highest historical progress  max agent_step ever observed          = step 120
+```
+
+All three at once is a **completely legal state**. Collapsing them into one
+`latest_checkpoint` field is a bug that has not happened yet.
+
+---
+
+## 26. What the user should see
+
+If the UI derives progress from the recovery head:
+
+```text
+progress = recovery_head.agent_step
+```
+
+it goes `120 → 100` after a recovery, which reads as data loss and generates
+support tickets for a system that behaved correctly.
+
+Show both, and say which is which:
+
+```text
+Execution progress:      120 steps attempted
+Current execution:       resumed from a checkpoint at step 100, now at step 106
+```
+
+backed by two fields that are honest about their own semantics:
+
+```text
+max_step_ever_attempted  = 120      historical high-water mark
+current_branch_step      = 106      position on the live lineage
+```
+
+### And do not invent a percentage
+
+Step count is not distance-to-completion for an agent, and the reason is
+structural rather than statistical:
+
+```text
+step 100
+git checkout          ← the workspace returns to a much earlier state
+step 101
+```
+
+Progress is not monotonic in the work itself, never mind in the recovery. A
+status that says `70% complete` is a fabrication. Report what is known:
+
+```text
+RUNNING
+step_count        = 106
+wall_time         = 34m
+tokens_used       = 81k
+current_attempt   = 4
+resumed_from_step = 100
+```
+
+Users tolerate an unknown completion time. They do not tolerate a progress bar
+that goes backwards, and they should not have to.
