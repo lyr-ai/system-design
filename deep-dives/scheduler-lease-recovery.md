@@ -261,6 +261,20 @@ Belt and braces is correct here, because the two mechanisms fail in different
 ways — the first depends on the worker being alive to act, the second on the
 host being alive to enforce.
 
+### But do not mistake self-fencing for correctness
+
+A partitioned worker cannot tell the difference between *the scheduler died*,
+*the network broke*, and *my lease was genuinely reassigned*. It can act only on
+its own **locally observed** expiry, and local clocks skew. So the lease carries
+both an expiration timestamp and a generation, and the line to hold is:
+
+> **Self-fencing is an optimisation; server-side fencing is the correctness
+> boundary.**
+
+Self-termination shrinks the split-brain window and stops a zombie burning
+tokens. It is not what makes the system correct — the store rejecting a stale
+generation is.
+
 ---
 
 ## 8. At-least-once, and what to do about duplicate effects
@@ -296,9 +310,78 @@ create_pull_request(
 ```
 
 A second execution calls with the same key and the tool service returns the
-first result instead of opening a second PR. The key is derived from position in
-the trajectory, never from a hash of the model's output — see below for why that
-distinction is not pedantic.
+first result instead of opening a second PR.
+
+### The key must bind to intent, not to position
+
+`job123-step47` is the obvious choice and it is **wrong**, for a reason specific
+to this workload. After B resumes from step 70, A and B are not on the same
+trajectory (§8, "a re-run model call is a new sample"). So:
+
+```text
+Worker A, generation 7          Worker B, generation 8
+step 47: create PR X            step 47: send Slack message
+key = job123-step47             key = job123-step47        ← same key,
+                                                             different effects
+
+step 47: create PR X            step 53: create PR X
+key = job123-step47             key = job123-step53        ← same effect,
+                                                             different keys
+```
+
+Both failure directions are live. Trajectory position is not a stable identifier
+once the trajectory can branch.
+
+Bind the key to the **logical operation** instead. The runtime canonicalises the
+proposed call and durably records it before anything executes:
+
+```text
+ToolOperation {
+  operation_id            derived from canonical_arguments, not from step
+  job_id
+  execution_generation
+  tool_name
+  canonical_arguments
+  status                  pending | committed | failed
+}
+```
+
+```text
+agent proposes tool call
+      ↓
+runtime canonicalises the intent
+      ↓
+durably create operation_id              ← before any external call
+      ↓
+tool service executes, keyed by operation_id
+      ↓
+result persisted
+      ↓
+agent receives the observation
+```
+
+On recovery, an `operation_id` already `committed` returns its previous result
+instead of re-performing the effect.
+
+This moves the hard question rather than removing it: **how do you decide that
+two proposals are the same logical operation?** For a deterministic workflow,
+trivially. For a stochastic agent, not trivially — canonicalisation is doing
+real work and it will not always succeed.
+
+### So classify the tools
+
+| class | examples | protection |
+|---|---|---|
+| pure read | `cat`, `grep`, search, `GET` | retry freely |
+| idempotent write | `PUT` state, conditional update with a version | idempotency token or compare-and-set |
+| irreversible external effect | send mail, create PR, charge a card, deploy | must not be guessed at by the runtime |
+
+For the third class the tool **service** carries `operation_id`, and the effect
+is executed by a guarded service rather than by the sandbox reaching the outside
+world directly. Which is the principle worth stating in one line:
+
+> **Don't give arbitrary agents raw credentials to perform irreversible side
+> effects directly. Route consequential actions through a guarded tool layer.**
 
 For the third class: record the intent in durable storage **before** performing
 the effect, keyed by the deterministic tuple above. On resume, the platform
@@ -760,6 +843,105 @@ heartbeat writes          1K/s at 10K jobs, per-job lease
 11. Why not the Kubernetes scheduler?
 12. Which worker do you place a job on, and when does a smaller worker win?
 13. How often do you checkpoint, and what is the tradeoff you are balancing?
+14. Why can an idempotency key not be derived from trajectory position?
+15. A third-party effect supports neither idempotency nor transactions. Now what?
+16. Is self-fencing a correctness mechanism? Defend the answer.
 
 If all ten come out fluently, this section is done. Move to the next deep dive
 rather than polishing this one.
+
+---
+
+## 20. The hardest version: an effect that cannot be made idempotent
+
+> **The agent calls `send_email()`. The provider supports no idempotency key and
+> no transactions. Worker A calls it successfully and crashes before persisting
+> the result. Worker B resumes from the older checkpoint, sees "not sent", and
+> is about to call again.**
+>
+> Constraints: the third party cannot be modified, the network is not
+> exactly-once, a silent duplicate is unacceptable, and the job must still
+> recover from crashes.
+
+**There is no exactly-once answer, and saying so first is the right move.**
+Atomic commitment across a boundary you do not control is not achievable. The
+design goal is different: convert a **silent duplicate** into a **detectable
+uncertainty**, then discharge the uncertainty.
+
+### 1. Write-ahead intent — turn unknown into known-unknown
+
+Durably record the operation as `pending` *before* the external call; mark it
+`committed` after. On recovery, `pending` means **the effect may or may not have
+happened** — which is not a solution but is the precondition for every one that
+follows. Without it, B cannot even tell that there is a question.
+
+### 2. Change the payload, not the system
+
+The provider has no idempotency key, but the **message body and headers are
+ours**. Embed the `operation_id` in something the provider will store and return:
+a custom header, the `Message-ID`, a marker in the footer.
+
+Almost every mail provider offers a sent-items list or a search. So on recovery:
+
+```text
+pending operation found
+      ↓
+search the provider for operation_id
+      ↓
+found      → mark committed, return the recorded result, do not resend
+not found  → the call did not land; send it
+```
+
+**The provider is not idempotent, but it is readable — trade readability for
+idempotency.** This is the only lever that needs no cooperation from the third
+party, and it is the answer worth leading with.
+
+### 3. When there is no read path either
+
+Then the platform must not guess on the user's behalf. The **tool declares its
+failure preference**, and the runtime honours it:
+
+| declared | on a `pending` operation after recovery | suits |
+|---|---|---|
+| `at_least_once` | resend | password reset, notification retries |
+| `at_most_once` | do not resend; park the job in `needs_reconciliation` | invoices, payments, anything a human would notice twice |
+
+Parking a job and asking a human is a legitimate engineering answer. Some
+questions cannot be resolved automatically, and a system that says so loudly is
+better than one that guesses quietly.
+
+### 4. Confine the problem structurally
+
+Irreversible effects should not be issued by the sandbox at all. Route them
+through a guarded effect service: the agent's call is a **durable enqueue**,
+which *is* idempotent because we own it, and a single-writer dispatcher drains
+the queue.
+
+```text
+sandbox ──▶ effect service ──▶ durable outbox ──▶ single dispatcher ──▶ provider
+            (idempotent by construction)            (the only place
+                                                     uncertainty lives)
+```
+
+The third party's lack of idempotency is then a property of **one component
+built to handle it**, rather than something every agent step must reason about.
+
+### 5. The ordering rule this depends on
+
+The reason B saw "not sent" is that the checkpoint predates the effect and was
+never updated. So: **checkpoint immediately before a side effect** (§9), and
+make the intent record durable before the call. That is what makes the recovery
+boundary and the idempotency boundary the same boundary — otherwise the state B
+wakes into and the state the intent log describes disagree.
+
+### 6. What is left, stated honestly
+
+Between *the provider accepted* and *our record says committed* there is a
+window no design removes. Two things can be done and neither is elimination:
+
+- **Make it small** — nothing between the intent write and the external call.
+- **Make it visible** — recovery always enters the reconcile path, never a
+  default retry.
+
+If asked to reduce it further, the answer is to move the effect out of the agent
+loop entirely (§4 above), not to add another protocol inside it.
