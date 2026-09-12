@@ -492,6 +492,30 @@ Without this, a partitioned worker A finishing a slow upload can publish a
 checkpoint that becomes the "latest" and overwrites B's recovery point with
 older state — a live worker losing work to a dead one.
 
+### But fence the publication, not the upload
+
+A distinction worth drawing precisely, because fencing everything is a common
+over-correction:
+
+```text
+blob upload              manifest publish
+     │                          │
+immutable                ownership-sensitive
+content-addressed              fenced
+```
+
+A worker on a revoked generation uploading a content-addressed blob is harmless.
+The blob is immutable, nothing references it, and it is collected as an orphan —
+or reused, if some later worker reaches byte-identical content. There is no
+correctness argument for rejecting it, and rejecting it costs a round trip on
+the hot path.
+
+What must be fenced is the **mutation of the pointer**: the publication that
+turns a set of blobs into a committed recovery point.
+
+> **Separate immutable data-plane writes from ownership-sensitive metadata
+> publication.**
+
 ### And *latest* cannot mean *newest timestamp*
 
 The classic trap:
@@ -729,3 +753,142 @@ restore                   base blob + ≤ N deltas, N bounded by re-basing
 15. Could a VM snapshot replace the whole design? Argue both tiers.
 16. A worker crashes mid-upload, after two of three blobs. What does the next
     worker restore, and what happens to the two blobs?
+17. Which writes need fencing — the blobs, the manifest, or both? Why.
+18. Publish is an insert plus a pointer update. Remove the atomicity problem.
+19. Why is equality on generation required where lexicographic order is not
+    enough?
+20. Is a per-job head a hot key at 100K jobs? Defend the number.
+
+---
+
+## 22. Checkpoint metadata at 100K jobs
+
+The naive publish is two writes:
+
+```text
+INSERT checkpoint(step=100, generation=7)
+UPDATE  job.latest_checkpoint = checkpoint_100
+```
+
+"Wrap it in a transaction" is correct and insufficient. At 100K running jobs
+checkpointing once a minute, that `UPDATE` puts ~1,700 writes/s onto the `jobs`
+row — the same row the scheduler, the recovery manager and the UI all read, and
+that job lifecycle transitions also write.
+
+### Make the log the truth, and the publish one row
+
+```text
+checkpoints
+  PK (job_id, generation, seq)  →  manifest refs, blob refs, created_at
+```
+
+**Insert-only.** The insert *is* the publication: the blobs are already durable,
+so the row appearing is what makes them a committed recovery point. One row, one
+atomic write, in any store. The two-write atomicity problem does not get solved —
+it stops existing.
+
+"Latest" becomes a query rather than a stored value:
+
+```sql
+SELECT * FROM checkpoints
+ WHERE job_id = :j
+ ORDER BY generation DESC, seq DESC
+ LIMIT 1
+```
+
+A reverse scan inside one partition. And the sort key **is** the rule from §13:
+generation first, so a revoked generation is never latest whatever its sequence
+number says.
+
+### The head is a cache, not the source of truth
+
+If the store has no cheap range scan, add one:
+
+```text
+checkpoint_head
+  PK (job_id)  →  (generation, seq, checkpoint_id)
+```
+
+Because the log remains the truth, the head is **rebuildable**, and a crash
+between the log insert and the head update costs one checkpoint rather than
+consistency — recovery falls back to a bounded scan.
+
+Advance it with a conditional write:
+
+```sql
+UPDATE checkpoint_head
+   SET seq = :s, checkpoint_id = :c
+ WHERE job_id = :j
+   AND generation = :g        -- equality, not comparison
+   AND seq < :s
+```
+
+### Why equality on generation, and not lexicographic order
+
+Comparing `(generation, seq)` lexicographically looks sufficient and is not.
+
+```text
+head = (7, 90)
+B takes over at generation 8 and has not checkpointed yet
+zombie A finishes its upload and publishes (7, 100)
+
+lexicographic:  (7,100) > (7,90)   → head advances to A's branch
+B then crashes; C takes over and restores from (7,100)
+                                   → B's work is silently discarded
+```
+
+Equality on the current generation — written into the head row by the scheduler
+at lease assignment — rejects A's publish outright, with **no extra read on the
+hot path**.
+
+### Out-of-order arrivals within a generation
+
+91, 92, 93 racing:
+
+```text
+93 lands  → head = (8, 93)
+92 lands  → seq < :s fails → head stays at 93
+```
+
+Correct: restoring from 93 is strictly better. And because the log insert is
+unconditional and keyed by `(job_id, generation, seq)`, 92's row still exists and
+a retried publish is idempotent rather than duplicated.
+
+### Is the head a hot key?
+
+No, and the reason is worth stating because it generalises:
+
+```text
+100K jobs × 1 checkpoint/min  =  1,667 writes/s
+spread across 100K distinct keys
+                              ≈  0.017 writes/s per key
+```
+
+**Hot keys come from fan-in, not from frequency.** One job writing its own head
+once a minute is nothing; 100K jobs writing *one shared* row is everything. The
+original design's problem was never the write rate — it was co-locating that
+write with the row every other subsystem reads.
+
+So what must not exist:
+
+- a **global monotonic sequence** — every publisher contending on one counter;
+- a **global "latest checkpoints" index** — same shape, same failure;
+- **`latest_checkpoint` as a column on `jobs`** — a per-job write on a row with
+  many unrelated readers.
+
+`seq` is per-job: the agent's step number, or a per-execution counter.
+
+### One consequence to know before it is asked
+
+`(generation, seq)` monotone does **not** imply step monotone. A new owner
+resumes from an older checkpoint, so:
+
+```text
+(8, 50)  at step 140
+(9,  1)  at step  90     ← newer by ownership, earlier in the trajectory
+```
+
+This is correct — the current owner's branch is the live one — but anything
+reading the head's step as a progress indicator will see it go backwards.
+Progress for a user is a property of the job, not of the latest checkpoint, and
+should be tracked separately.
