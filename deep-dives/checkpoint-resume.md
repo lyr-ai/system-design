@@ -765,6 +765,13 @@ restore                   base blob + ≤ N deltas, N bounded by re-basing
 25. A stale branch got further than the live one. Adopt it? Justify.
 26. Name the three "latests" and give a legal state where all three differ.
 27. Why should a long-running agent job not report a completion percentage?
+28. An expensive read-only tool ran after the last checkpoint. On recovery, is
+    its result replayed or recomputed? What decides?
+29. What must a tool-result cache key contain beyond the arguments, and what
+    kind of bug is omitting the auth scope?
+30. Recovery and replay want different values for the same observation. Resolve
+    it without picking one globally.
+31. Which tool-result payloads may be sampled, and which may not?
 
 ---
 
@@ -1173,3 +1180,149 @@ resumed_from_step = 100
 
 Users tolerate an unknown completion time. They do not tolerate a progress bar
 that goes backwards, and they should not have to.
+
+---
+
+## 27. Which observations to persist, and which to recompute
+
+> Checkpoint `C100` is committed. Worker A then runs steps 101–110 without
+> checkpointing. During those steps it calls an expensive but **read-only**
+> external tool — say $2 a call — and the observation `O` shapes its reasoning
+> for the rest of the range. A crashes. B resumes from `C100`.
+>
+> Should B re-call the tool, or replay the recorded result?
+
+### First: B does not have that choice
+
+`O` was obtained after `C100`, so the restored transcript ends at step 100 and
+contains no trace of it. B does not know the call happened.
+
+"Replay the result" is only an option if a durable record of tool results exists
+**outside the checkpoint**. So the real question is not *replay or recompute*, it
+is *what is recorded, when, and keyed by what*.
+
+### Decouple result persistence from checkpoint cadence
+
+Persist the result at the moment of the call:
+
+```text
+ToolResult {
+  key            canonicalised semantic input
+  value_ref
+  observed_at
+  freshness_class
+  provenance     job_id, execution_generation, step   ← recorded, not part of the key
+}
+```
+
+B re-runs step 101. If it issues the same call, the record serves it: no second
+$2, and no divergence introduced by the world having moved. If B's trajectory
+has branched and it issues a *different* call, the record does not match and the
+tool runs — which is also correct, because a different question deserves a
+different answer.
+
+> **This decouples "how often we checkpoint" from "how much expensive work a
+> crash destroys."** Otherwise an expensive tool silently forces a high
+> checkpoint frequency on a system that did not otherwise need one.
+
+### The key is semantic input, and getting it wrong is a security bug
+
+Keying on `hash(tool_name, canonical_args)` alone is wrong for anything but a
+pure function of its arguments. The key must include everything that can change
+the result:
+
+```text
+tool_name
+canonical_args
+tool_version            a new version may answer differently
+tenant / auth scope     ← the important one
+environment / repo revision
+locale / region
+freshness bucket        for time-windowed results
+```
+
+> **Cache by canonicalised semantic input, never by trajectory position — and
+> never by arguments alone.**
+
+Omitting `auth scope` is not a correctness bug that returns a stale answer. Two
+tenants asking the same question with different permissions hit the same entry,
+and one of them receives data it is not entitled to. **A cache key that omits
+the authorisation context is a cross-tenant data leak wearing a performance
+optimisation's clothes.**
+
+Sharing across jobs is a real win at 100K agents — and it is only available for
+the subset of tools where the full semantic key genuinely captures every input.
+Scope the cache to a tenant by default and widen it deliberately, per tool.
+
+### Classify by cost × volatility
+
+Not by read versus write — that axis belongs to the effects discussion. Here:
+
+| | **stable** | **volatile** |
+|---|---|---|
+| **cheap** | `cat`, `grep` — recompute; storing costs more than re-running | `git status` — recompute |
+| **expensive** | paid retrieval over a static corpus, embeddings, a compile — **cache by semantic key**, the largest win | live search, current price, current PR state — the only genuinely hard cell |
+
+For the hard cell the tool declares a **freshness contract**:
+
+```text
+if now - observed_at <= max_staleness    → serve the record
+else                                     → re-execute, and mark the step
+                                           as re-observed
+```
+
+Marking matters. A silently refreshed observation is a divergence that nothing
+in the trajectory records, and it will be blamed on the model later.
+
+### Recovery and replay want opposite things
+
+This is the distinction the whole section turns on:
+
+| | wants | because |
+|---|---|---|
+| **recovery** | the *present* value | the job is live; if the world changed, acting on the change is more correct |
+| **replay** | the *recorded* value | the goal is reproducing what happened, which stale or not is the point |
+
+So it is not a choice between them. **Record always, for replay. Decide per
+tool whether recovery reads the record or re-executes.** A design that picks one
+policy globally will be wrong for half its tools.
+
+### Retention, and what may not be sampled
+
+Storing every payload for every call forever is not available at this scale, but
+the tiering has to follow **use**, not volume:
+
+| payload | policy |
+|---|---|
+| **recovery-critical** — a record recovery is expected to serve | retention and freshness policy per tool; **never sampled** |
+| **observability / replay** — kept to reconstruct or audit | sampled, tiered, expired |
+| **digest only** — hash, size, timestamp | kept broadly; cheap |
+
+The distinction that is easy to get wrong: *sample the payloads* sounds prudent
+and quietly removes the entry recovery was going to need. **If recovery is
+expected to serve a payload, its retention is a correctness property, not a
+storage policy.**
+
+The digest tier earns its place independently: a hash is enough to **detect**
+that an observation differed on replay, while only the payload can **reproduce**
+it. Detection is cheap and broadly useful; reproduction is expensive and needed
+for a minority of runs.
+
+### The part with no answer
+
+```text
+expensive  +  volatile  +  causally load-bearing for later reasoning
+```
+
+> **If an observation is expensive, volatile, and causally important to later
+> reasoning, recovery must choose between consistency with the past and
+> correctness with respect to the present. The system cannot manufacture both.**
+
+Replay the old value and the agent continues coherently on information that may
+now be false. Fetch a new one and the agent is coherent with the world but no
+longer on the trajectory its transcript describes.
+
+That is a **product decision**, not an engineering one. What engineering owes it
+is to surface the choice, make it configurable per tool, and record which branch
+was taken — rather than defaulting silently and letting the divergence surface
+later as unexplained agent behaviour.
