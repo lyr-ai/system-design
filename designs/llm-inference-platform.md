@@ -724,73 +724,181 @@ endpoint of §3 is a good closing move.
 > **Which replica — and design the score so the answer flips by itself when A is
 > overloaded enough?**
 
-### First, admission, not preference
+### The memory question, asked correctly
 
-Before any scoring: **does it fit?** A is at 78% of a ~49 GB pool, so roughly
-11 GB free. At the order of ~200 KB per token for this class of model
-(*estimated, not measured*), a 52K-token sequence needs ~10.5 GB.
-
-It *just* fits, and it pushes A past 95%. So the memory term here is not a soft
-penalty — it is adjacent to a hard bound, and routing there risks preempting a
-sequence that is already generating. **A replica that cannot fit the request is
-eliminated before scoring, not penalised within it.**
-
-### The score
+The trap is to price the request at its context length:
 
 ```text
-Score(r) = T_queue(r) + T_prefill(r) + T_decode(r) + λ · M(KV_util(r))
+52K tokens × ~200 KB/token ≈ 10.5 GB      ← wrong on A
 ```
 
-**Prefill.** A hits 50K and prefills the 2K delta ≈ 0.5 s, measured warm hits
-landing at 0.6–0.9 s. B prefills 52K cold ≈ 12.7 s. A factor of fifteen.
-
-**Decode — and this is where a naive answer goes wrong.**
+**A already holds those 50K tokens of KV.** They are counted in its 78%. Under
+paged attention with prefix caching the new sequence takes a reference to the
+existing blocks and allocates only what is genuinely new:
 
 ```text
-2000 / 49 ≈ 41 s        ← the batch-1 single-stream rate, not the answer
+incremental KV(A)  =  2K new prompt + up to 2K decode  ≈ 4K tokens
+incremental KV(B)  =  52K prompt + up to 2K decode     ≈ 54K tokens
 ```
 
-Under continuous batching, decode step time is dominated by reading the weights,
-so at **short context** adding sequences barely changes per-sequence rate — that
-is why batching is nearly free. At **50K context** it is not: attention reads the
-whole KV cache every step, so KV traffic scales with batch × sequence length and
-decode crosses from weight-bandwidth-bound to **KV-bandwidth-bound**. On A, with
-twelve long sequences already resident, per-sequence decode is materially below
-49 tok/s; on idle B it is close to it.
-
-### The result is not one-sided
+A factor of thirteen, in the opposite direction from the naive reading. So a
+cache hit changes **two** terms, not one:
 
 ```text
-TTFT            A: 1.8 + 0.9  ≈  2.7 s     B: 0 + 12.7  ≈  12.7 s      A wins
-completion      A: 2.7 + 2000/~35 ≈ 60 s   B: 12.7 + 41 ≈  54 s        B may win
+cache hit  →  lower T_prefill
+           →  lower ΔKV_required
 ```
 
-**A wins time-to-first-token; B may win total completion.** Which matters is an
-SLO question: for interactive chat TTFT *is* the product, while an agent waits
-for the whole response and feels only the total.
+which is why it should never be modelled as a `cache_hit = true` bonus. It is
+two physical quantities getting smaller.
 
-### But the fleet view usually decides, and it favours A
+**One second-order effect worth knowing.** Those 50K cached blocks were
+*evictable* while nothing referenced them; admitting this request pins them.
+A's usable headroom therefore falls by more than 4K tokens' worth — the
+reclaimable cache it was implicitly counting on is now held. The drop is far
+smaller than 52K and larger than 4K, and a free-pool accounting that ignores
+refcount transitions will over-admit.
 
-B spends 12.7 s of compute-bound GPU time recomputing 50K tokens that A already
-holds. At 10K agents, **redundant prefill is the single largest source of wasted
-capacity in the cluster.** Paying a few seconds of per-request latency to avoid
-a 50K-token prefill is a good trade for everyone else in the queue.
+### Two stages, and the first is not a score
+
+**Hard admission:**
+
+```text
+IncrementalKV(request, r)  ≤  FreeKV(r) − SafetyMargin
+```
+
+Incremental, not total context. A replica that fails this is removed from
+consideration rather than penalised inside the score — a near-OOM replica should
+not be rescued by a large enough cache bonus.
+
+**Then soft scoring:**
+
+```text
+Score(r) = w_q·T̂_queue + w_p·T̂_prefill + w_d·T̂_decode + w_m·M(KV_post)
+
+KV_post = KV_current + IncrementalKV
+```
+
+Prefix hits show up automatically in `T̂_prefill` and in `KV_post`. There is no
+branch for them anywhere.
+
+### Estimating the terms
+
+**Prefill.** A prefills the 2K delta ≈ 0.5 s; measured warm full hits landed at
+0.6–0.9 s. B prefills 52K cold ≈ 12.7 s, consistent with the measured 53K/13.0 s.
+
+**Decode, stated carefully.** The batch-1 rate is not the answer:
+
+```text
+2000 / 49 ≈ 41 s        ← single-stream, idle replica
+```
+
+At small batch sizes decode benefits strongly from batching, because the weight
+read is amortised across sequences. As batch size and context length grow,
+activation, attention and KV-cache traffic matter more, and per-sequence
+inter-token latency eventually degrades. **Where that crossover sits depends on
+the architecture, GQA or MQA, batch, context length, kernel, GPU and KV dtype** —
+so it is a direction, not a formula.
+
+```text
+A, 13 sequences at long context  →  perhaps ~35 tok/s per sequence
+```
+
+**Illustrative estimate, not measured.** `13 × 50K` decode was never benchmarked
+on this deployment, and presenting a guess as a derived number is the fastest way
+to lose an interviewer who has.
+
+### There is no universally optimal answer
+
+```text
+TTFT            A: 1.8 + 0.9  ≈  2.7 s     B: 0 + 12.7  ≈  12.7 s
+completion      A: 2.7 + ~57  ≈  60 s      B: 12.7 + 41 ≈  54 s
+```
+
+**A can win TTFT while B wins end-to-end completion.** Which one the router
+should optimise depends on the request class:
+
+| workload | objective |
+|---|---|
+| interactive chat | `TTFT + α · ITL` — the first token is the product |
+| agent call | end-to-end latency — the caller waits for the whole response |
+| batch / offline | GPU cost per completed token — latency barely matters |
+
+> There is no universally optimal router. Policy is a function of **request
+> class, SLO, and current replica state** — and a design that names one metric
+> as "the" objective has not asked what the traffic is for.
+
+### The fleet argument, and its limit
+
+B spends 12.7 s of compute-bound GPU time recomputing 50K tokens A already
+holds. At scale, redundant prefill is among the largest sources of wasted
+capacity.
+
+But "A is obviously better for the cluster" overstates it:
+
+> **A has a strong cluster-efficiency advantage because it avoids recomputing a
+> 50K-token prefill, but that benefit must be compared against the marginal
+> latency and memory pressure imposed on the sequences already resident on A.**
+
+Which introduces the quantity that actually matters:
+
+```text
+MarginalCost(request → replica)
+```
+
+not *how long does this request take*, but **how much total cost does placing it
+here add across everything already running there**. So the mature objective is
+
+```text
+Score(r) = request latency  +  β · cluster externality
+```
+
+with the externality covering:
+
+```text
+added inter-token latency for resident sequences
+KV pressure
+eviction risk
+preemption risk
+prefix-cache eviction — displacing a hot prefix costs the next job a full prefill
+```
 
 ### What makes it flip automatically
 
-`M(KV_util)` must be **non-linear**. At 78% it is a modest penalty that the
-15× prefill advantage easily outweighs. Approaching 90–95% it has to rise
-steeply enough to dominate a 12-second prefill saving — so
+`M(KV_post)` must be **non-linear**: a modest penalty at 78%, rising steeply near
+90–95% until it dominates any prefill advantage. Then
 
 ```text
 A: queue 15 s, KV 94%
 ```
 
 spills to B through the same formula, with no special case and no `if cached`
-branch anywhere.
+branch.
 
-> **Cache affinity is not a routing rule. It is one term in an estimated-work
-> model.**
+> **Cache affinity is not a routing rule. It is one term — now two — in an
+> estimated-work model.**
 
-The corollary for the interview: never answer "A, because it has the cache". The
-cache changes `T_prefill`. Everything else still has to be added up.
+### The two-minute version
+
+> I'd route to A, but not because it has the cache — because of what the cache
+> does to two terms. It removes 50K tokens of prefill, about 12 seconds, and it
+> means the request needs roughly 4K tokens of incremental KV instead of 54K,
+> since those blocks are already resident and get referenced rather than
+> reallocated.
+>
+> I'd make that a two-stage decision. First a hard admission check on
+> *incremental* KV against free pool minus a safety margin, so a replica near
+> OOM is eliminated rather than outscored. Then a score over estimated queue,
+> prefill and decode time plus a non-linear penalty on post-admission KV
+> occupancy.
+>
+> A wins here, though not unambiguously — it wins time-to-first-token while the
+> idle replica might win end-to-end, and which of those matters depends on
+> whether this is a chat turn or an agent call. What breaks the tie is the fleet:
+> avoiding a redundant 50K prefill is worth more than a few seconds of this
+> request's latency, as long as it does not degrade the twelve sequences already
+> on A too far — which is what the memory term and the externality term are for.
+>
+> And because affinity is a term rather than a rule, when A reaches 94% occupancy
+> and a 15-second queue the same formula sends the request to B. No branch for
+> cache hits anywhere.
