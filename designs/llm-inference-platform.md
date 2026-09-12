@@ -343,13 +343,20 @@ If the TTFT target is 2 s, then
 2 s × 4,100 tokens/s  ≈  8,000 tokens
 ```
 
-is the largest prompt that can meet it from cold. That is the threshold: above
-it, the request cannot hit the short-context SLO no matter how it is scheduled,
-so it belongs in a queue with a different promise rather than in the same queue
-degrading everyone else's.
+is the largest prompt that can meet it from cold. Above it the request cannot hit
+the short-context SLO however it is scheduled, so it belongs in a queue with a
+different promise rather than in the same queue degrading everyone else's.
 
-Saying "we separate long and short requests" is fine. Deriving the boundary from
-a measured prefill rate and a stated SLO is the difference.
+**Label the number honestly.** 8K is an SLO-derived threshold *for this measured
+model, this hardware and this configuration*. Change the model, the card, the
+prefix hit rate or whether chunked prefill is on, and it moves. The sentence that
+travels is not the number:
+
+> I wouldn't hard-code 8K globally. I derive the request-class boundary from
+> measured cold-prefill throughput and the TTFT SLO.
+
+Saying "we separate long and short requests" is fine. Deriving the boundary is
+the difference.
 
 ---
 
@@ -638,11 +645,29 @@ duty cycle ≈ 10/45 ≈ 22%
 10,000 agents  →  ≈ 2,200 concurrent sequences, not 10,000
 ```
 
-An agent holds **no KV cache between steps** — it is thinking about nothing, it
-is running a test in a container somewhere else. That is why one inference pool
-can serve far more agents than it has slots, and it is the quantitative version
-of the "do not pin a GPU to each agent" rule from
+Between steps an agent holds **no active-sequence KV** — it is running a test in
+a container somewhere else, occupying no decode slot. That is why one inference
+pool serves far more agents than it has slots, and it is the quantitative
+version of the "do not pin a GPU to each agent" rule from
 [design #1 §8](agent-execution-platform.md).
+
+**But do not conflate two capacity dimensions.** Its *prefix cache blocks* may
+well still be resident, and that is the point of keeping them:
+
+```text
+agent leaves to run pytest
+      ↓
+active decode slot released
+      ↓
+its historical prefix may stay in cache
+      ↓
+next step returns and skips tens of seconds of prefill
+```
+
+So a 22% duty cycle estimates **active serving demand**. It does not estimate
+**total KV residency**, which is set by the cache retention policy of §10.
+Sizing a pool from the duty cycle alone under-counts memory by whatever the
+cache is holding — which, for this workload, is deliberately a lot.
 
 ---
 
@@ -678,3 +703,94 @@ compromise for both. Splitting them into separate pools, with KV transferred
 between, lets each be sized and scaled for its own bottleneck — at the cost of
 moving tens of gigabytes per request across the fabric. Naming it as the logical
 endpoint of §3 is a good closing move.
+
+---
+
+## 18. Worked routing decision
+
+> Two A100 replicas of the same model.
+>
+> ```text
+> Replica A                         Replica B
+>   50K-token prefix cached           idle
+>   12 active decode sequences        no prefix cached
+>   queue delay 1.8 s                 queue delay 0
+>   KV occupancy 78%                  KV occupancy 20%
+> ```
+>
+> New request: 52K prompt whose first 50K matches A's cached prefix,
+> `max_output_tokens` 2K, normal priority.
+>
+> **Which replica — and design the score so the answer flips by itself when A is
+> overloaded enough?**
+
+### First, admission, not preference
+
+Before any scoring: **does it fit?** A is at 78% of a ~49 GB pool, so roughly
+11 GB free. At the order of ~200 KB per token for this class of model
+(*estimated, not measured*), a 52K-token sequence needs ~10.5 GB.
+
+It *just* fits, and it pushes A past 95%. So the memory term here is not a soft
+penalty — it is adjacent to a hard bound, and routing there risks preempting a
+sequence that is already generating. **A replica that cannot fit the request is
+eliminated before scoring, not penalised within it.**
+
+### The score
+
+```text
+Score(r) = T_queue(r) + T_prefill(r) + T_decode(r) + λ · M(KV_util(r))
+```
+
+**Prefill.** A hits 50K and prefills the 2K delta ≈ 0.5 s, measured warm hits
+landing at 0.6–0.9 s. B prefills 52K cold ≈ 12.7 s. A factor of fifteen.
+
+**Decode — and this is where a naive answer goes wrong.**
+
+```text
+2000 / 49 ≈ 41 s        ← the batch-1 single-stream rate, not the answer
+```
+
+Under continuous batching, decode step time is dominated by reading the weights,
+so at **short context** adding sequences barely changes per-sequence rate — that
+is why batching is nearly free. At **50K context** it is not: attention reads the
+whole KV cache every step, so KV traffic scales with batch × sequence length and
+decode crosses from weight-bandwidth-bound to **KV-bandwidth-bound**. On A, with
+twelve long sequences already resident, per-sequence decode is materially below
+49 tok/s; on idle B it is close to it.
+
+### The result is not one-sided
+
+```text
+TTFT            A: 1.8 + 0.9  ≈  2.7 s     B: 0 + 12.7  ≈  12.7 s      A wins
+completion      A: 2.7 + 2000/~35 ≈ 60 s   B: 12.7 + 41 ≈  54 s        B may win
+```
+
+**A wins time-to-first-token; B may win total completion.** Which matters is an
+SLO question: for interactive chat TTFT *is* the product, while an agent waits
+for the whole response and feels only the total.
+
+### But the fleet view usually decides, and it favours A
+
+B spends 12.7 s of compute-bound GPU time recomputing 50K tokens that A already
+holds. At 10K agents, **redundant prefill is the single largest source of wasted
+capacity in the cluster.** Paying a few seconds of per-request latency to avoid
+a 50K-token prefill is a good trade for everyone else in the queue.
+
+### What makes it flip automatically
+
+`M(KV_util)` must be **non-linear**. At 78% it is a modest penalty that the
+15× prefill advantage easily outweighs. Approaching 90–95% it has to rise
+steeply enough to dominate a 12-second prefill saving — so
+
+```text
+A: queue 15 s, KV 94%
+```
+
+spills to B through the same formula, with no special case and no `if cached`
+branch anywhere.
+
+> **Cache affinity is not a routing rule. It is one term in an estimated-work
+> model.**
+
+The corollary for the interview: never answer "A, because it has the cache". The
+cache changes `T_prefill`. Everything else still has to be added up.
