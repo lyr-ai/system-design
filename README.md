@@ -12,7 +12,7 @@ reuses the vocabulary the previous one established.
 | # | design | state | it deep-dives |
 |---|---|---|---|
 | 1 | [Agent Execution Platform](designs/agent-execution-platform.md) | drafted | — the whole system |
-| 2 | Multi-tenant GPU inference service | — | the Model Service box |
+| 2 | [Multi-tenant LLM inference platform](designs/llm-inference-platform.md) | part 1 | the Model Service box |
 | 3 | Large-scale agent evaluation platform | — | what runs on top of #1 |
 | 4 | Secure sandbox service for untrusted code | — | the Sandbox box |
 | 5 | Agent checkpoint / replay / debugging | — | the Checkpoint + Event boxes |
@@ -37,7 +37,7 @@ notes. At that point stop polishing and start the next design.
 |---|---|---|
 | [Scheduler, lease, failure recovery](deep-dives/scheduler-lease-recovery.md) | #1 §8 §9 §18 | drafted |
 | [Checkpoint and resume](deep-dives/checkpoint-resume.md) | #1 §12 | drafted |
-| Sandbox and isolation | #1 §10 §11 | — |
+| Sandbox and isolation | #1 §10 §11 | — (after #2) |
 | Control/data plane and the failure model | #1 §6 §18 | — |
 | Capacity with a shared GPU pool | #1 §8 §17 | — |
 
