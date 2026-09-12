@@ -21,6 +21,26 @@ reuses the vocabulary the previous one established.
 be delivered in 45 minutes without the notes, which is the only state that
 counts on the day.
 
+## Deep dives
+
+T-shaped, deliberately. Each design gets its architecture straight, then four or
+five sections go deep — the ones most likely to be pushed on. Everything else
+stops at "two or three minutes and knows the tradeoff", because writing all
+twenty sections to this depth is writing a distributed systems textbook, and the
+interview return does not scale with the page count.
+
+The bar for done: the interviewer points at any core box and asks *why*, *what
+if it fails*, *what at 100×*, and the answer runs five to ten minutes without
+notes. At that point stop polishing and start the next design.
+
+| deep dive | of | state |
+|---|---|---|
+| [Scheduler, lease, failure recovery](deep-dives/scheduler-lease-recovery.md) | #1 §8 §9 §18 | drafted |
+| Sandbox and isolation | #1 §10 §11 | — |
+| Checkpoint and resume | #1 §12 | — |
+| Control/data plane and the failure model | #1 §6 §18 | — |
+| Capacity with a shared GPU pool | #1 §8 §17 | — |
+
 ## Document shape
 
 Fixed by the first document and followed by the rest, so that revision is

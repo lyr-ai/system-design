@@ -354,6 +354,8 @@ will be wrong often enough to matter.
 
 ## 9. Queue and lease model
 
+> Deep dive: [Scheduler, lease, failure recovery](../deep-dives/scheduler-lease-recovery.md)
+
 Choose: **durable queue + worker lease.**
 
 ```text
