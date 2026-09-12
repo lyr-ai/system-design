@@ -3,81 +3,226 @@
 > Belongs to [System Design #1](../designs/agent-execution-platform.md), §8 §9 §18.
 
 The interviewer points at the Scheduler box and asks *why*, *what if it fails*,
-and *what happens at 100×*. This is the material for the next ten minutes.
+and *what happens at 100×*.
 
-**What is actually being tested.** Not whether you know the word "lease". Whether
-you understand that **failure detection is unreliable**, and that every design
-downstream of it is shaped by that one fact.
+**What is being tested.** Not whether you know the word "lease". Whether you can
+derive it — because the derivation is what you have to reproduce at a whiteboard,
+and a memorised conclusion collapses on the second follow-up.
+
+So this document is built as the derivation: the naive design, what breaks, the
+fix, what breaks next.
 
 ---
 
-## 1. Why a lease, and not the alternatives
+## 1. Why a scheduler at all
 
-Three ways to give a worker a job. Two of them are wrong here, and being able to
-say *why* is the answer.
-
-**Push and forget.** Scheduler assigns, worker starts. If the worker dies the
-job is lost, because nothing is watching. Fine for work that can be rerun from
-the client; useless for a job carrying two hours of state.
-
-**Push with acknowledgement.** Scheduler assigns, worker acks on completion. The
-scheduler now knows about success, but still cannot distinguish *slow* from
-*dead*, which is the only question that matters. Adding a timeout to this turns
-it into a lease with extra steps.
-
-**Lease: time-bounded ownership.** The worker holds the job until `now + T` and
-must renew. The scheduler does not detect failure at all — it observes the
-**absence of renewal**, which is a fact it can act on locally, without agreement
-from anyone.
+The user submits:
 
 ```text
-scheduler                         worker
-    │   assign(job, lease=30s) ──────▶ │
-    │                                  │  start sandbox, run loop
-    │  ◀──── renew(job) every 10s ──── │
-    │                                  │
-    │         (no renewal)             ✗  crash / partition / GC pause
-    │  lease expires at T+30           │
-    │  job becomes schedulable         │
+Run this coding agent on repo X
 ```
 
-The key property: **the scheduler needs no cooperation from a failed worker.**
-Any design that requires the dead party to participate in its own funeral does
-not work.
+The naive implementation looks sufficient:
 
-### Choosing the lease duration
+```text
+API  →  pick a worker  →  start container  →  run agent
+```
+
+At 10K concurrent agents it is not, and the questions it cannot answer are the
+specification:
+
+```text
+which worker has capacity?
+how much CPU/RAM does this job need?
+who goes first?
+can one tenant take every worker?
+what if a worker dies?
+what if the machine disappears two hours into a job?
+what if 50K jobs arrive at once?
+```
+
+So the scheduler's job is not *starting containers*. It is:
+
+> **continuously, safely and fairly mapping pending work onto finite execution
+> capacity.**
+
+Starting the container is the easy part and the wrong thing to describe.
+
+---
+
+## 2. Three things that must not be conflated
+
+```mermaid
+flowchart LR
+    C[Client] --> API[Job API]
+    API --> DB[(Job Store)]
+    API --> Q[Durable Queue]
+    Q --> S[Scheduler]
+    S --> W1[Worker 1]
+    S --> W2[Worker 2]
+    S --> W3[Worker N]
+    W1 --> SB1[Sandbox]
+    W2 --> SB2[Sandbox]
+    W3 --> SB3[Sandbox]
+    W1 --> DB
+    W2 --> DB
+    W3 --> DB
+    W1 -. heartbeat .-> S
+    W2 -. heartbeat .-> S
+    W3 -. heartbeat .-> S
+```
+
+| | is | holds |
+|---|---|---|
+| **Job Store** | source of truth | `job_id, status, attempt, assigned_worker, checkpoint, resource_request` |
+| **Queue** | what is waiting | ordering and readiness, nothing authoritative |
+| **Scheduler** | the decision | which job goes to which worker, and when to take it back |
+
+Conflating them is the most common structural mistake in this answer. In
+practice the queue is often a view over the store (§6), but the *roles* stay
+distinct: one is truth, one is order, one is policy.
+
+---
+
+## 3. What breaks: assignment is not ownership
+
+Suppose the scheduler hands out the job and considers itself done.
+
+```text
+12:00:00   scheduler → worker-17: run job-123
+12:00:01   worker-17 starts
+12:35:00   worker-17's machine dies
+```
+
+The job was going to run for two hours. **How does the scheduler find out?**
+
+Not from the worker. A crashed process cannot say
+
+```text
+"I'm dead."
+```
+
+Any design that requires the failed party to participate in its own funeral does
+not work. Detection has to be something the scheduler can conclude **alone**.
+
+---
+
+## 4. The fix: lease
+
+The scheduler does not say *job-123 belongs to worker-17*. It says:
+
+> **worker-17 holds the right to execute job-123 until time T.**
+
+```text
+job_id       123
+worker       worker-17
+lease_until  12:00:30
+```
+
+The worker renews every 10 s:
+
+```text
+12:00:10  →  lease until 12:00:40
+12:00:20  →  lease until 12:00:50
+12:00:30  →  lease until 12:01:00
+```
+
+While the worker is healthy the lease walks forward. When it stops, the lease
+expires on its own — **no cooperation from the failed worker is required**,
+which is precisely the property §3 showed was missing.
+
+### Recovery, concretely
+
+```text
+12:34:40   last renewal, lease_until = 12:35:10
+12:34:45   worker dies
+12:35:10   lease expires
+
+           RUNNING
+              ↓      reaper sees status=RUNNING with an expired lease
+           RECOVERING
+              ↓      load latest checkpoint
+           QUEUED
+              ↓      scheduler assigns worker-42
+           RUNNING
+```
+
+### Choosing the numbers
 
 | | short lease (10 s) | long lease (5 min) |
 |---|---|---|
-| detection | fast | slow — job idle for minutes |
-| false expiry | frequent under GC pause or network blip | rare |
+| detection | fast | job idle for minutes |
+| false expiry | frequent under GC pause or a network blip | rare |
 | renewal load | high | low |
 
 **Detection time is bounded below by how long a healthy worker can be silent.**
-A JVM-style GC pause or a container throttled on CPU can stall a process for
-seconds. Setting the lease shorter than the worst tolerable pause converts
-stalls into evictions, and evictions of a two-hour job are far more expensive
-than a minute of delayed detection.
+A stop-the-world pause or a CPU-throttled container can stall a process for
+seconds; a lease shorter than the worst tolerable stall converts stalls into
+evictions, and evicting a two-hour job costs far more than a minute of delayed
+detection.
 
 Reasonable: **lease 30 s, renew every 10 s**, so two consecutive renewals can be
-lost before expiry. Recovery time is then `lease + schedule + sandbox start`, or
-roughly 30 + 1 + 2 = **~33 s**, plus whatever work was done since the last
-checkpoint.
+lost before expiry. End-to-end recovery is `lease + schedule + sandbox start`
+≈ 30 + 1 + 2 = **~33 s**, plus whatever work happened since the last checkpoint.
 
 ---
 
-## 2. The hard part: lease expiry does not mean the worker is dead
+## 5. "Why not just use heartbeats?"
 
-This is the follow-up that separates a memorised answer from an understood one.
+This follow-up comes almost every time, and the answer is a distinction rather
+than a mechanism:
 
-A lease expires when renewals stop. Renewals stop when the worker is dead —
-**or** when it is alive and partitioned, or paused, or its disk is slow. In
-those cases the scheduler reassigns the job while the original worker is still
-running it. Two executions, both believing they own the job, both writing
-checkpoints and events.
+```text
+heartbeat  =  evidence of liveness
+lease      =  time-bounded authority
+```
 
-You cannot fix this by making the lease longer. You can only make the damage
-impossible.
+A heartbeat is a **signal**: it tells you something was alive at some past
+instant. It does not tell you when you are *permitted* to act on its absence.
+Two observers can disagree about whether a heartbeat was missed, and both can be
+right.
+
+A lease defines **when the system is entitled to consider the original owner to
+have lost the right to execute**. It is an ownership semantic with an expiry,
+not an observation — which is why it can be enforced by a store that never saw
+the worker at all (§7).
+
+Heartbeats are how a lease gets renewed. They are not a substitute for one.
+
+---
+
+## 6. What breaks next: the old worker is not dead
+
+The failure is not a crash but a partition:
+
+```text
+                   network partition
+                          ✕
+    worker-17 ────────────✕──────────── scheduler
+```
+
+worker-17 is still running the agent. The scheduler simply cannot hear it. The
+lease expires, the job is reassigned, and now:
+
+```text
+worker-17  →  job 123
+worker-42  →  job 123
+```
+
+**Two workers executing the same job.** Which is the point to state plainly:
+
+> a lease is not exactly-once execution.
+
+A lease bounds *authority*, not *activity*. It guarantees the scheduler may
+safely reassign; it guarantees nothing about what the old holder is still doing.
+
+Making the lease longer does not fix this — it only widens the window in which
+the job is stalled while a worker is genuinely dead. The damage has to be made
+**impossible**, not unlikely. That is §7 and §8.
+
+---
+
+## 7. Fencing: making the zombie harmless
 
 ### Fencing tokens
 
@@ -118,7 +263,7 @@ host being alive to enforce.
 
 ---
 
-## 3. At-least-once, and what to do about duplicate effects
+## 8. At-least-once, and what to do about duplicate effects
 
 Given the above, the honest guarantee is **at-least-once**. Say so directly, and
 say why you are not attempting exactly-once:
@@ -135,6 +280,25 @@ say why you are not attempting exactly-once:
 | pure | read a file, run a test | re-run freely |
 | idempotent with a key | write an object, upsert a row | dedup key derived from `(job_id, step, tool_call_id)` |
 | genuinely at-most-once | `git push`, send an email, charge a card | write-ahead intent, then a dedup check at the boundary |
+
+Agents make this harder than ordinary batch work. A batch job reads, computes,
+writes. An agent may `git push`, open a pull request, send mail, call a payment
+API, modify a database, deploy. None of those are safe to simply retry.
+
+So the **tool layer**, not the agent loop, carries the key:
+
+```text
+create_pull_request(
+    repo = X,
+    patch = Y,
+    idempotency_key = "job123-step47"
+)
+```
+
+A second execution calls with the same key and the tool service returns the
+first result instead of opening a second PR. The key is derived from position in
+the trajectory, never from a hash of the model's output — see below for why that
+distinction is not pedantic.
 
 For the third class: record the intent in durable storage **before** performing
 the effect, keyed by the deterministic tuple above. On resume, the platform
@@ -161,7 +325,110 @@ Consequences:
 
 ---
 
-## 4. Scheduler durability and leader election
+## 9. Checkpoints: how much work is lost, and how often to pay
+
+Recovery is only cheap if there is something to recover to.
+
+```text
+step 0 → ... → step 80 → worker crash
+```
+
+With no checkpoint, the replacement worker restarts at step 0 and eighty steps
+of tokens and tool time are gone. With a checkpoint every ten steps:
+
+```text
+checkpoint @ step 70
+crash      @ step 78
+new worker → restore step 70 → continue
+```
+
+Eight steps lost instead of seventy-eight.
+
+### What has to be in it
+
+The lesson that does not come from a textbook: **restoring the source code is not
+restoring the agent.**
+
+```text
+AgentCheckpoint
+├── message history
+├── tracked workspace state
+├── untracked / scratch workspace
+├── agent runtime metadata
+├── tool state
+└── step and budget state
+```
+
+Drop the scratch files and the resumed agent contradicts itself — it remembers
+writing a reproduction script, reads it back, and is told the file does not
+exist. What follows is not a resumed job, it is a confused one. (Full treatment
+in deep dive #3.)
+
+### How often
+
+There is no single right answer, and saying so with the tradeoff is the answer:
+
+```text
+expected loss  ≈  failure rate × work since last checkpoint
+checkpoint cost ≈  snapshot size × frequency
+```
+
+Checkpoint every step and recovery is nearly free while storage I/O dominates.
+Every hundred steps and it is cheap until something crashes.
+
+What works in practice is **periodic plus event-triggered**:
+
+```text
+every 10 steps
+AND immediately before:
+    an external side effect
+    a large code modification
+    an expensive tool call
+    context compaction
+```
+
+The event-triggered half is what makes §8 tractable: if a checkpoint always
+precedes a side effect, the recovery boundary and the idempotency boundary are
+the same boundary.
+
+---
+
+## 10. Placement: which worker, actually
+
+The naive loop:
+
+```text
+for each queued job:
+    find a worker with enough CPU/RAM
+    assign
+```
+
+At scale the inputs are more than fit:
+
+```text
+resource fit        tenant fairness      priority
+data locality       sandbox image locality      expected duration
+```
+
+Image locality is the one people miss, and it can dominate. A job needing
+2 CPU / 8 GB with image `swebench/astropy`:
+
+| | free capacity | image | verdict |
+|---|---|---|---|
+| Worker A | 4 CPU, 16 GB | **cached** | wins |
+| Worker B | 16 CPU, 64 GB | not cached | loses |
+
+A is the better placement despite having a quarter of the headroom, because
+pulling a multi-gigabyte image turns a two-second sandbox start into a
+two-minute one — and the startup SLO is p50 under 2 s.
+
+**Expected duration is listed and should be distrusted.** Measured on a single
+fixed task, run lengths ranged from three minutes to over six hours. Any packing
+decision that leans on a duration estimate will be wrong often enough to matter.
+
+---
+
+## 11. Scheduler durability and leader election
 
 Two questions hide here: *is the scheduler stateful*, and *what happens when it
 dies*.
@@ -205,7 +472,7 @@ platform.
 | Agent API | no | stateless replicas behind a load balancer |
 | Scheduler | no | another instance continues from the store |
 | Job store | **yes** | the platform stops; replicate, this is the one |
-| Lease / heartbeat store | yes, but cheap | see §7 — different store at scale |
+| Lease / heartbeat store | yes, but cheap | see §12 — different store at scale |
 | Checkpoint store | **yes** | jobs cannot resume; running jobs continue, admission pauses |
 | Event bus | yes | buffer at the worker, backfill; do not block the agent loop |
 
@@ -215,7 +482,7 @@ bad; stalling ten thousand jobs because a Kafka broker is unhappy is worse.
 
 ---
 
-## 5. Why the job store is the queue
+## 12. Why the job store is the queue
 
 The natural question: *why not Kafka or SQS?*
 
@@ -243,7 +510,7 @@ SELECT job_id FROM jobs
 
 ---
 
-## 6. Admission, fairness, and preemption
+## 13. Admission, fairness, and preemption
 
 ### Admission
 
@@ -295,7 +562,45 @@ jobs; let running ones finish, because they hold the expensive state.
 
 ---
 
-## 7. What breaks at 100×
+## 14. "Why not the Kubernetes scheduler?"
+
+Very likely to be asked. The answer that fails is *Kubernetes is not good
+enough*. The answer that works:
+
+> I would probably use Kubernetes as part of the underlying resource substrate,
+> but I would not make a Kubernetes Pod the complete agent scheduling
+> abstraction.
+
+Because the scheduling decisions here are **application-level**:
+
+```text
+long-running execution     checkpoint / resume
+step budget                model budget
+tenant quota               tool side effects
+agent priority
+```
+
+Kubernetes reasons about CPU, RAM, Pods and Nodes. It does not know that this
+agent has spent $17, run 87 steps, holds a checkpoint at step 80, and is
+currently blocked on inference rather than on CPU. Those are the facts every
+decision in this design depends on.
+
+So: two schedulers, solving different problems.
+
+```text
+Agent Scheduler      job semantics, budgets, leases, fairness
+      ↓
+Kubernetes           bin-packing pods onto nodes
+      ↓
+Node / sandbox
+```
+
+This is a considerably more mature answer than proposing to replace Kubernetes,
+and it is also what real platforms do.
+
+---
+
+## 15. What breaks at 100×
 
 The best question in this section, and the answer is not "more workers".
 
@@ -332,13 +637,98 @@ more than either of the others.
 scales with agent *activity* rather than agent *count*. Partition by `job_id` so
 per-job order is preserved and nothing needs global ordering.
 
-**Sandbox capacity** is the answer people reach for and it is the least
+**Sandbox cold start** becomes its own capacity problem: 100K cold starts is not
+solved by more hosts. Warm pools, image caching and snapshot restore are the
+three levers, and the pool is sized to **peak arrival rate**, not peak
+concurrency — sizing it to concurrency buys a fleet of idle VMs.
+
+**Raw sandbox capacity** is the answer people reach for and it is the least
 interesting: it scales by adding hosts, which is the easy axis. Saying so — and
-naming the two above instead — is the differentiator.
+naming the others instead — is the differentiator.
 
 ---
 
-## 8. Numbers to have ready
+## 16. The one diagram to memorise
+
+If only one thing gets drawn, draw this. The horizontal rule is the argument.
+
+```text
+                    CONTROL PLANE
+ Client
+   │
+   ▼
+ Job API ─────→ Job Store
+   │
+   ▼
+ Durable Queue
+   │
+   ▼
+ Scheduler
+   │
+   ├── quota
+   ├── priority
+   ├── resource fit
+   ├── leases
+   └── recovery
+   │
+════════════════════════════════════════════
+                    DATA PLANE
+   │
+   ▼
+ Worker Pool
+   │
+   ▼
+ Sandbox
+   │
+   ▼
+ Agent Runtime
+   │
+   ├────────────→ Tool Services
+   │
+   └────────────→ Model Gateway → GPU Pool
+
+ Cross-cutting:
+   Checkpoint Store
+   Event Stream
+   Telemetry
+```
+
+Above the line, nothing executes user code. Below it, everything does. That one
+sentence is why the split exists, and it answers half the failure questions
+before they are asked.
+
+---
+
+## 17. Saying it out loud
+
+> **"A worker running a two-hour coding agent stops heartbeating. Walk me
+> through exactly what happens."**
+
+Aim for this, in your own words rather than memorised:
+
+> Each running execution holds a time-bounded lease, which the worker renews
+> while it executes. If heartbeats stop and the lease expires, the control plane
+> marks **the execution** as lost — not the job. Those are different things, and
+> conflating them is what makes a platform lose work it did not need to.
+>
+> The scheduler then opens a new execution attempt from the latest durable
+> checkpoint and assigns a new fencing generation. A replacement worker rebuilds
+> the sandbox and the agent state from that checkpoint and resumes.
+>
+> Because the original worker may only be partitioned rather than dead, I don't
+> assume exactly-once execution. Durable writes and externally visible tool
+> operations are guarded by the current fencing generation or an idempotency
+> key, so a stale worker cannot overwrite a newer checkpoint or repeat a side
+> effect after ownership has moved.
+
+The load-bearing sentence is the second one in the first paragraph: **the
+execution is lost, the job is not.** It is why the data model separates them
+(§design 1 §4) and it is the phrase that signals you have thought about this
+rather than read about it.
+
+---
+
+## 18. Numbers to have ready
 
 ```text
 lease duration            30 s
@@ -354,7 +744,7 @@ heartbeat writes          1K/s at 10K jobs, per-job lease
 
 ---
 
-## 9. Rehearsal — answer each in 60 seconds
+## 19. Rehearsal — answer each in 60 seconds
 
 1. Why a lease rather than assignment with acknowledgement?
 2. Your lease expired but the worker is alive and still running. What happens?
@@ -367,6 +757,9 @@ heartbeat writes          1K/s at 10K jobs, per-job lease
    connects the two.
 9. At 100× scale, what breaks first? Not sandboxes — why not?
 10. How long is a job unavailable after its worker dies, and which term dominates?
+11. Why not the Kubernetes scheduler?
+12. Which worker do you place a job on, and when does a smaller worker win?
+13. How often do you checkpoint, and what is the tradeoff you are balancing?
 
 If all ten come out fluently, this section is done. Move to the next deep dive
 rather than polishing this one.
