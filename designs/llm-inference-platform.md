@@ -275,7 +275,378 @@ spending the same budget. One measured deployment moved `max_num_seqs` from 8 to
 
 ---
 
-## 7. Where Part 2 picks up
+## 7. Architecture
+
+```mermaid
+flowchart LR
+    C[Clients / Agents] --> G[Model Gateway]
+    G --> QS[Short-context Queue]
+    G --> QL[Long-context Queue]
+    QS --> R[Inference Router]
+    QL --> R
+    R <--> MD[Replica Metadata]
+    R --> PA[Replica Pool A]
+    R --> PB[Replica Pool B]
+    R --> PC[Replica Pool C]
+    PA --> W1[GPU Workers]
+    PB --> W2[GPU Workers]
+    PC --> W3[GPU Workers]
+    AS[Autoscaler] --> PA
+    AS --> PB
+    AS --> PC
+    PA --> T[Telemetry]
+    PB --> T
+    PC --> T
+    T --> AS
+```
+
+Two boxes are easy to collapse into one and should not be.
+
+**Model Gateway — tenant-facing.** Authentication, per-tenant quota and budget,
+OpenAI-compatible translation, admission. It reasons about *who is asking* and
+never about which GPU.
+
+**Inference Router — capacity-facing.** Picks a replica using live replica state:
+KV pressure, queue depth, and which prefixes are already cached. It reasons about
+*where this should run* and never about billing.
+
+Keeping them apart means quota logic does not need to know about KV cache, and
+routing does not need to know about tenants — except where fairness deliberately
+crosses the line (§11).
+
+---
+
+## 8. Two queues, because prefill blocks
+
+Chunked prefill (§4) protects the *batch* from a long prompt. It does nothing for
+the *queue*: a 500-token request that arrives behind a 60,000-token request still
+waits for it to be admitted.
+
+```text
+                 ┌── short-context queue ──┐
+gateway ────────▶│                         ├──▶ router
+                 └── long-context queue ───┘
+```
+
+Served with a weight, so short requests get predictable TTFT and long ones get a
+floor that prevents starvation.
+
+**The split point is computed, not chosen.** From the measured prefill rate:
+
+```text
+53,348 prompt tokens in 13.0 s   →  ≈ 4,100 tokens/s of prefill
+```
+
+If the TTFT target is 2 s, then
+
+```text
+2 s × 4,100 tokens/s  ≈  8,000 tokens
+```
+
+is the largest prompt that can meet it from cold. That is the threshold: above
+it, the request cannot hit the short-context SLO no matter how it is scheduled,
+so it belongs in a queue with a different promise rather than in the same queue
+degrading everyone else's.
+
+Saying "we separate long and short requests" is fine. Deriving the boundary from
+a measured prefill rate and a stated SLO is the difference.
+
+---
+
+## 9. Routing
+
+**Round-robin is the expensive default.** It distributes load evenly and throws
+away the 20× from §3 on every request.
+
+Route by **prefix affinity**: prefer the replica whose KV cache already holds
+this prompt's prefix.
+
+```text
+hash the prompt prefix
+      ↓
+candidate replicas holding it
+      ↓
+among candidates, pick the least loaded
+      ↓
+no candidate, or all above a load ceiling → least loaded overall
+```
+
+Two refinements that matter:
+
+**Affinity is a preference with a ceiling, not a rule.** Pure affinity
+concentrates every request for a popular system prompt onto one replica. The
+ceiling — a KV utilisation or queue-depth threshold above which affinity is
+abandoned — is what keeps it from becoming a hotspot generator.
+
+**For agents, session affinity is a cheap approximation.** An agent's successive
+calls share a monotonically growing prefix, so routing by `job_id` gets most of
+the benefit of prefix hashing with none of the machinery. Prefix hashing still
+earns its place for the *shared* prefix across jobs — a common system prompt,
+few-shot examples, a shared repository context.
+
+### What "loaded" means here
+
+Not requests per second. The router reads replica metadata for:
+
+```text
+KV cache utilisation      the real capacity signal
+queue depth               the TTFT signal
+running sequences         against max_num_seqs
+```
+
+A replica at 95% KV with four running sequences is *full*; a replica at 30% KV
+with forty short sequences has room. Request count says the opposite of the
+truth in both cases.
+
+---
+
+## 10. Prefix caching: when the 20× applies
+
+```text
+applies                              does not apply
+shared system prompts                unique one-shot prompts
+agent transcripts (grows each step)  high-cardinality user text
+few-shot blocks                      after eviction
+shared RAG context                   after a prefix-altering edit
+```
+
+**The agent case is the best case that exists.** Each step re-sends the whole
+transcript, so step *n*'s prompt is step *n−1*'s prompt plus a delta. The cache
+hit is nearly total and only the delta is new work. From the sizing in
+[design #1 §17](agent-execution-platform.md):
+
+```text
+naive prefill        220 req/s × 30K tokens  ≈ 6.6M tokens/s   not buildable
+with prefix caching  220 req/s ×  2K tokens  ≈ 440K tokens/s
+```
+
+**~15× on cluster size.** Prefix caching is not an optimisation in an agent
+workload; it is the difference between a buildable design and an unbuildable one.
+
+### The tension nobody mentions
+
+**Cached prefixes and running sequences share the same KV pool.** Every block
+held for a possible future hit is a block unavailable to a sequence generating
+right now.
+
+```text
+more cached prefixes  →  higher hit rate, fewer concurrent sequences
+fewer cached prefixes →  more concurrency, more re-prefill
+```
+
+So eviction policy is a capacity decision. LRU is the default and is wrong for
+this workload in one specific way: an agent that pauses for 45 s between steps
+looks cold, and evicting its prefix costs a full re-prefill of tens of thousands
+of tokens on its next call. **Weight by re-prefill cost, not by recency** — a
+large prefix that would be expensive to rebuild is worth keeping longer than a
+small one touched more recently.
+
+---
+
+## 11. Replica sizing
+
+Three configurations, and the choice follows from §6 rather than from taste.
+
+| | when | cost |
+|---|---|---|
+| one model per GPU | weights + a useful KV pool fit on one card | simplest; the default |
+| tensor parallel across N | weights alone do not fit, **or** `max_model_len` needs more KV than one card leaves | an all-reduce per layer on every step — real latency, worst for decode |
+| several models per GPU | all small, and traffic is bursty and uncorrelated | weights crowd out KV; rarely worth it |
+
+Worked from the measured anchor:
+
+```text
+27B FP8 weights ≈ 31 GB
+
+one A100 80 GB     →  ≈ 49 GB KV
+TP2 over 2× 80 GB  →  15.5 GB weights each, ≈ 64 GB KV each, ≈ 129 GB total
+```
+
+TP roughly **doubles** usable KV per replica while adding per-layer
+communication. The decision rule:
+
+> Use tensor parallelism when **context length** demands KV that one card cannot
+> provide — not to make decode faster. Decode is bandwidth-bound and TP adds
+> synchronisation to it.
+
+---
+
+## 12. Autoscaling
+
+**Scale on the wrong signal and nothing works.**
+
+| signal | why it fails |
+|---|---|
+| requests/s | requests are not equal (§2) |
+| GPU utilisation | decode keeps utilisation high while producing almost nothing at batch 1 |
+| CPU | irrelevant |
+
+Scale on what actually saturates:
+
+```text
+queue wait time        → the TTFT SLO is being missed
+KV cache utilisation   → capacity is genuinely gone
+```
+
+### Cold start is the constraint
+
+A replica must download and load tens of gigabytes of weights and allocate its
+KV pool. That is **minutes**, against a traffic spike measured in seconds.
+
+Reactive autoscaling therefore cannot work by itself. What does:
+
+- **Warm pool** of loaded-but-idle replicas, sized to the expected spike rather
+  than to average load.
+- **Predictive scaling** on schedule, since internal agent traffic is usually
+  diurnal and known.
+- **Headroom as policy** — run at 70% rather than 95%, and treat the difference
+  as the price of a workload that cannot scale in under a minute.
+
+### Scale-down is the harder direction
+
+A replica holds sixty in-flight sequences, each possibly minutes from finishing.
+Draining means: stop admitting, wait, and then decide what to do about the
+stragglers.
+
+```text
+stop admitting
+      ↓
+wait for natural completion, with a drain deadline
+      ↓
+at the deadline: fail the remainder, or re-prefill them elsewhere
+```
+
+There is no migration of a partially generated sequence between replicas that
+does not cost a full re-prefill, so **the drain deadline is a real cost
+decision** rather than a formality.
+
+---
+
+## 13. Multi-tenancy and fairness
+
+Fairness requires a unit, and **requests are the wrong unit** — a request may be
+500 tokens or 500,000.
+
+Tokens are closer, but prefill and decode tokens do not cost the same. Use a
+measured cost model:
+
+```text
+cost  =  a · prompt_tokens  +  b · output_tokens
+```
+
+with `a` and `b` derived from the measured prefill and decode rates on the
+actual hardware — from §3 and §8 on this deployment, roughly 4,100 prefill
+tokens/s against 49 decode tokens/s per stream, so a decode token is far more
+expensive in occupancy terms than a prefill token.
+
+### Three enforcement points, each doing a different job
+
+```text
+gateway    admission, quota, budget       who is allowed to ask
+router     replica choice                 whether a tenant can be isolated
+engine     batch slots                    who gets the next step
+```
+
+### The noisy neighbour is concrete here
+
+A tenant sending 100,000-token prompts degrades **everyone's TPOT** on that
+replica, because the prefill enters the same decode loop (§4). Mitigations, in
+increasing order of cost:
+
+1. the long-context queue (§8) — keeps it out of the short path,
+2. per-tenant concurrency caps — bounds how much of a replica one tenant holds,
+3. dedicated replicas — real isolation, real cost, and the honest answer for a
+   tenant that needs a latency guarantee.
+
+---
+
+## 14. Failure
+
+**A replica dies holding sixty sequences.** There is no checkpoint for a
+half-generated response — the KV cache is the state, and it is gone.
+
+| request type | response |
+|---|---|
+| short, idempotent | retry on another replica; the cost is a re-prefill |
+| long-running generation | fail it and surface the reason; a silent retry doubles the bill |
+| streaming, partially delivered | the client already has a prefix of the answer |
+
+That last row is the interesting one. A streaming client holds real output, so
+"retry" could mean re-prompting with what was already emitted and continuing.
+That is **not the same request** — it changes the conditioning — and if it is
+done at all it must be visible to the caller rather than hidden inside a retry
+loop.
+
+Which connects directly to [design #1](agent-execution-platform.md): a retried
+model call is a **new sample**, not a repeat. The agent's trajectory branches,
+and the platform that retried silently is the reason nobody can reproduce the
+run.
+
+---
+
+## 15. Cost
+
+The bill is in GPU-hours. The user sees tokens. The exchange rate between them
+**is** the design.
+
+```text
+cost per token  =  GPU $/hour  ÷  tokens/hour
+```
+
+and `tokens/hour` is almost entirely a function of batch size, because decode
+reads the same weights per step regardless (§3).
+
+```text
+A100 at ~$2/hour
+
+batch 1     ≈ 49 tokens/s  ≈ 176K tokens/hour   ≈ $11 per million tokens
+batch 32    ≈ 20× that                          ≈ $0.6 per million tokens
+```
+
+> **Batch size is not a performance knob. It is the price.**
+
+Which reframes every earlier section: routing that preserves prefix cache,
+queue separation that keeps batches full, autoscaling that avoids running at
+batch 2 — these are cost decisions expressed as latency mechanisms.
+
+---
+
+## 16. Agent traffic has a specific shape
+
+Worth its own section because it is the dominant workload here and it is
+unusually well-behaved in one way and badly behaved in another.
+
+```text
+prompt        large and growing monotonically — 20K to 60K tokens by late in a run
+output        modest — hundreds to a few thousand tokens
+cadence       one call per agent per ~45 s
+aggregate     smooth, because thousands of agents desynchronise
+```
+
+**The good part:** prefix growth is append-only, so cache hit rates approach
+total and only the delta is prefilled (§10).
+
+**The bad part:** every active sequence carries an enormous KV footprint, so the
+pool is consumed by context rather than by concurrency.
+
+**The saving grace, and the arithmetic to have ready:**
+
+```text
+one call per agent per 45 s, each occupying a slot for ~10 s
+duty cycle ≈ 10/45 ≈ 22%
+
+10,000 agents  →  ≈ 2,200 concurrent sequences, not 10,000
+```
+
+An agent holds **no KV cache between steps** — it is thinking about nothing, it
+is running a test in a container somewhere else. That is why one inference pool
+can serve far more agents than it has slots, and it is the quantitative version
+of the "do not pin a GPU to each agent" rule from
+[design #1 §8](agent-execution-platform.md).
+
+---
+
+## 17. Where Part 3 would pick up
 
 With the workload model established, the remaining questions are all downstream
 of it:
@@ -291,6 +662,19 @@ cost                 tokens, GPU-hours, and which one the bill is in
 agent traffic        the specific shape it has, and why it is the good case
 ```
 
-The order matters: routing and autoscaling both reduce to the memory budget and
-the prefill/decode asymmetry, and answering them without §3 and §6 produces
-plausible-sounding designs that do not survive arithmetic.
+Remaining, and none of it is load-bearing for the interview:
+
+```text
+speculative decoding     throughput at the cost of complexity
+disaggregated serving    separate prefill and decode fleets — the logical
+                         conclusion of §3, and increasingly the real answer
+quantisation choices     FP8 versus INT4, quality against memory
+LoRA multiplexing        many fine-tunes on shared base weights
+```
+
+**Disaggregation is the one to know exists.** If prefill is compute-bound and
+decode is bandwidth-bound, running them on the same device forces one
+compromise for both. Splitting them into separate pools, with KV transferred
+between, lets each be sized and scaled for its own bottleneck — at the cost of
+moving tens of gigabytes per request across the fabric. Naming it as the logical
+endpoint of §3 is a good closing move.
