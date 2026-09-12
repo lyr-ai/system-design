@@ -36,8 +36,8 @@ notes. At that point stop polishing and start the next design.
 | deep dive | of | state |
 |---|---|---|
 | [Scheduler, lease, failure recovery](deep-dives/scheduler-lease-recovery.md) | #1 §8 §9 §18 | drafted |
+| [Checkpoint and resume](deep-dives/checkpoint-resume.md) | #1 §12 | drafted |
 | Sandbox and isolation | #1 §10 §11 | — |
-| Checkpoint and resume | #1 §12 | — |
 | Control/data plane and the failure model | #1 §6 §18 | — |
 | Capacity with a shared GPU pool | #1 §8 §17 | — |
 
