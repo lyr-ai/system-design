@@ -758,6 +758,11 @@ restore                   base blob + ≤ N deltas, N bounded by re-basing
 19. Why is equality on generation required where lexicographic order is not
     enough?
 20. Is a per-job head a hot key at 100K jobs? Defend the number.
+21. Is idempotency enough for the checkpoint log? What does it fail to prevent?
+22. Why is a stale-generation checkpoint dangerous beyond being redundant?
+23. Name the three orderings and say which one may go backwards.
+24. Checkpoint lineage is a tree. What does that change about GC?
+25. A stale branch got further than the live one. Adopt it? Justify.
 
 ---
 
@@ -851,8 +856,69 @@ hot path**.
 ```
 
 Correct: restoring from 93 is strictly better. And because the log insert is
-unconditional and keyed by `(job_id, generation, seq)`, 92's row still exists and
-a retried publish is idempotent rather than duplicated.
+keyed by `(job_id, generation, seq)`, 92's row still exists and a retried publish
+is idempotent rather than duplicated.
+
+### Idempotency is not fencing, and the log needs both
+
+An earlier version of this had the log insert *unconditional* — idempotent by
+key, fenced only at the head. That is wrong, and the failure is not subtle:
+
+```text
+gen 7   A's last committed checkpoint = step 90
+gen 8   B takes over, resumes from 90, reaches step 98, has not checkpointed
+        zombie A finishes its upload and inserts (gen7, seq100)
+
+log now holds   (gen7, 90)
+                (gen7, 100)   ← written after ownership was revoked
+
+B crashes. C takes over at gen 9 and asks for the latest committed checkpoint.
+```
+
+With an unconditional insert, C gets `(gen7, 100)` — a recovery point created by
+a worker that no longer owned the job.
+
+**And the damage is worse than a lost branch.** A's checkpoint carries A's
+`external_effect_cursor`. B, running from step 90 to 98, may have performed
+irreversible effects that A's cursor knows nothing about. C resumes believing
+fewer effects have happened than actually have, and re-performs them. That is
+not lost work; it is a duplicated payment.
+
+So the two properties are orthogonal and both are required:
+
+| | guards against | mechanism |
+|---|---|---|
+| idempotency | the same publish arriving twice | primary key `(job_id, generation, seq)` |
+| fencing | a publish from a revoked owner | conditional on `current_generation` |
+
+> **The checkpoint row is itself ownership-sensitive metadata, not just the head
+> pointer.**
+
+The publish becomes:
+
+```text
+blob writes                 unconditional, immutable, content-addressed
+      ↓
+publish manifest            conditional on current_generation == my_generation
+```
+
+against a tiny authoritative record:
+
+```text
+execution_epoch {
+  job_id
+  current_generation        written once per lease assignment
+}
+```
+
+**Keep that record in the same partition as the checkpoints** — keyed by
+`job_id` — so the conditional insert is a single-partition transaction rather
+than a distributed one. It is written rarely and read on every publish, which is
+the easy direction.
+
+A useful consequence: once the log itself is fenced, no stale-generation row can
+exist, so the head's generation check becomes redundant and the head CAS reduces
+to `seq < :s`. The head is then unambiguously a cache.
 
 ### Is the head a hot key?
 
@@ -892,3 +958,116 @@ This is correct — the current owner's branch is the live one — but anything
 reading the head's step as a progress indicator will see it go backwards.
 Progress for a user is a property of the job, not of the latest checkpoint, and
 should be tracked separately.
+
+---
+
+## 23. Three kinds of order, and why they must not share a number
+
+Once recovery exists, a single sequence number is being asked to mean three
+different things, and it cannot.
+
+```text
+gen 8 / seq 50 / agent_step 120
+      ↓ crash
+gen 9 / seq  1 / agent_step 100      ← C resumed from an older checkpoint
+```
+
+By ownership the system moved **forward**: generation 9 follows 8. By progress it
+moved **backward**: step 120 to 100. Both readings are correct, and a design with
+one counter has to lie about one of them.
+
+> **Do not overload one sequence number to represent both ownership order and
+> logical progress.**
+
+| dimension | answers | monotonic? |
+|---|---|---|
+| `generation` | who owns execution right now | strictly, forever |
+| `checkpoint_seq` | which checkpoint within this attempt | strictly, within a generation |
+| `agent_step` | how far the agent thinks it has got | **no** — may go backwards on recovery |
+
+```text
+CheckpointManifest {
+  job_id
+  generation
+  checkpoint_seq
+  agent_step
+  parent_checkpoint_id
+  ...
+}
+```
+
+### What each one is used for
+
+- **Recovery selection** uses `generation` and `checkpoint_seq`, never
+  `agent_step`. Choosing by progress is how a stale branch gets adopted because
+  it happened to get further.
+- **Billing and limits** use `agent_step` and the budgets, which are properties
+  of work performed, not of ownership.
+- **User-visible progress** uses neither directly — see below.
+
+---
+
+## 24. Checkpoints form a lineage, not a sequence
+
+`parent_checkpoint_id` is the field that makes the previous section coherent.
+With recovery and branching, the checkpoint history is a **tree**:
+
+```text
+C90
+ │
+ ├──────── A / gen7 ─── C100        stale branch, never adopted
+ │
+ └──────── B / gen8 ─── C95
+                         │
+                         ✗ crash
+                         │
+                         └── C / gen9 ─── C96 ─── C110
+```
+
+The live lineage is
+
+```text
+C90 → C95 → C96 → C110
+```
+
+and emphatically **not** `C90 → C100 → …`.
+
+So every checkpoint records which committed recovery point it extends. Three
+things become expressible that were not:
+
+**Recovery becomes unambiguous.** When a generation is created, record the
+`base_checkpoint_id` it resumed from. The current owner's chain is then *its base
+plus its own checkpoints*, and "latest" is `max(checkpoint_seq)` within the
+current generation, falling back to the base when it has not checkpointed yet.
+No comparison across generations is needed at all — which removes the class of
+bug §22 had to guard against.
+
+**Garbage collection gets a reachability rule.** Blobs are reachable from
+committed manifests on the **live lineage**. A's `C100` and everything it alone
+references is collectable once the branch is abandoned — with the usual grace
+period, and with an escape hatch: an abandoned branch is often exactly what a
+debugging session wants, so mark rather than delete when the job failed.
+
+**Branch adoption becomes a decision you can refuse explicitly.** Someone will
+ask: A's `C100` is further along than `C95`, why not take it? Because progress
+is not the ordering that matters, and because A and B diverged on effects — B's
+`external_effect_cursor` and A's disagree, and nothing in the checkpoint can
+reconcile them. **Never adopt a branch from a revoked generation**, and be able
+to say why in one sentence.
+
+### Reporting progress to a user
+
+If the UI reads `agent_step` from the latest checkpoint, it will go backwards
+after every recovery, which looks like a bug and generates support tickets.
+
+Progress is a property of the **job**, not of the latest checkpoint. Report
+either the high-water mark across the live lineage, or scope it explicitly to
+the attempt:
+
+```text
+"attempt 3, step 100"      honest and stable
+"step 120 → step 100"      the same number pretending to be monotonic
+```
+
+The second is the one to avoid, and noticing it before the interviewer does is
+the point of this section.
