@@ -422,9 +422,10 @@ Consequences:
   as replay in the interview; it will not survive the follow-up.
 - The trajectory must record which steps were retried, or users cannot account
   for their own runs.
-- Deduplication keys must be derived from `(job_id, step)` — position in the
-  trajectory — and **not** from a hash of the model's output, which is not
-  stable across attempts.
+- Deduplication keys can be derived neither from a hash of the model's output,
+  which is not stable across attempts, nor from `(job_id, step)`, because the
+  branched trajectory reuses step numbers for different operations. They come
+  from the canonicalised operation, as above.
 
 ---
 
@@ -506,7 +507,7 @@ AgentCheckpoint
 Drop the scratch files and the resumed agent contradicts itself — it remembers
 writing a reproduction script, reads it back, and is told the file does not
 exist. What follows is not a resumed job, it is a confused one. (Full treatment
-in deep dive #3.)
+in [deep dive #2](checkpoint-resume.md).)
 
 ### How often
 

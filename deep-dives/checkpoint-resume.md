@@ -133,7 +133,7 @@ argument — the checkpoint store is one of the stores that does the rejecting.
 
 **`external_effect_cursor`** records how far the durable effect log was drained.
 Without it, resume cannot tell which irreversible actions already crossed the
-boundary, and the whole §21 machinery of the previous deep dive has nothing to
+boundary, and the whole §20 machinery of the previous deep dive has nothing to
 read.
 
 ---
