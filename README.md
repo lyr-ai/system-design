@@ -23,7 +23,7 @@ one reuses the vocabulary the previous one established.
 | 2 | [Multi-tenant LLM inference platform](designs/llm-inference-platform.md) | drafted | the Model Service box |
 | 3 | [Agent evaluation and experimentation platform](designs/agent-evaluation-platform.md) | drafted | what runs on top of #1 and #2 |
 | 4 | Secure sandbox service for untrusted code | — | the Sandbox box |
-| 5 | Agent checkpoint / replay / debugging | — | the Checkpoint + Event boxes |
+| 5 | [Agent checkpoint, replay and debugging](designs/agent-checkpoint-replay-debugging.md) | drafted | the Checkpoint + Event boxes, and what runs on them |
 
 `state` is one of `outline` · `drafted` · `condensed` — the last meaning a
 two-page version exists **and** the design can be explained from it without
