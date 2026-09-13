@@ -1,13 +1,21 @@
 # System design notes
 
-Preparation for system design interviews, weighted toward AI/ML and agent
-infrastructure. One document per topic, written rather than scaffolded.
+Notes on designing AI/ML and agent infrastructure, written to understand it
+rather than to summarise it. One document per system, each worked through from
+requirements to failure modes, with the numbers measured where they could be
+and stated as guesses where they could not.
+
+The subject is the stack underneath long-running AI agents: what runs them,
+what serves the model to them, how they are evaluated, how they are isolated,
+and how their state is saved and recovered. The designs come from building
+pieces of that stack for [AgentSeism](https://github.com/lyr-ai/agentseism)
+and from the questions that came up doing so.
 
 ## The series
 
 Five designs that compose. The first is the whole picture; the rest are deep
-dives into one box of it, which is why they are worth doing in order — each one
-reuses the vocabulary the previous one established.
+dives into one box of it, which is why they are worth reading in order — each
+one reuses the vocabulary the previous one established.
 
 | # | design | state | it deep-dives |
 |---|---|---|---|
@@ -17,21 +25,21 @@ reuses the vocabulary the previous one established.
 | 4 | Secure sandbox service for untrusted code | — | the Sandbox box |
 | 5 | Agent checkpoint / replay / debugging | — | the Checkpoint + Event boxes |
 
-`state` is one of `outline` · `drafted` · `whiteboard` — the last meaning it can
-be delivered in 45 minutes without the notes, which is the only state that
-counts on the day.
+`state` is one of `outline` · `drafted` · `condensed` — the last meaning the
+design also exists as a two-page version that can be explained from memory,
+which is the test of whether it has actually been understood.
 
 ## Deep dives
 
 T-shaped, deliberately. Each design gets its architecture straight, then four or
-five sections go deep — the ones most likely to be pushed on. Everything else
-stops at "two or three minutes and knows the tradeoff", because writing all
-twenty sections to this depth is writing a distributed systems textbook, and the
-interview return does not scale with the page count.
+five sections go deep — the ones where the system is genuinely hard, or where
+the obvious answer is wrong. Everything else stops at "knows the tradeoff",
+because writing all twenty sections to full depth is writing a distributed
+systems textbook, and understanding does not scale with the page count.
 
-The bar for done: the interviewer points at any core box and asks *why*, *what
-if it fails*, *what at 100×*, and the answer runs five to ten minutes without
-notes. At that point stop polishing and start the next design.
+The bar for done: point at any core box and ask *why*, *what if it fails*,
+*what at 100×*, and the answer runs for five to ten minutes without notes. At
+that point stop polishing and start the next design.
 
 | deep dive | of | state |
 |---|---|---|
@@ -41,28 +49,40 @@ notes. At that point stop polishing and start the next design.
 | Control/data plane and the failure model | #1 §6 §18 | — |
 | Capacity with a shared GPU pool | #1 §8 §17 | — |
 
-## Whiteboard skeletons
+## Condensed versions
 
-The step from `drafted` to `whiteboard`: the same design compressed to what
-gets said unprompted in 45 minutes, with section pointers back to the full
-text. Two pages, no new content.
+The step from `drafted` to `condensed`: the same design compressed to what
+would be said explaining it to someone in one sitting, with section pointers
+back to the full text. Two pages, no new content. If it cannot be told from
+the condensed page, the full text has not been understood yet.
 
-| skeleton | walkthrough | of |
+| condensed | as a talk | of |
 |---|---|---|
-| [bullets](whiteboard/agent-evaluation-platform.md) | [spoken, with transitions](whiteboard/agent-evaluation-platform-walkthrough.md) | #3 |
+| [bullets](condensed/agent-evaluation-platform.md) | [spoken, with transitions](condensed/agent-evaluation-platform-talk.md) | #3 |
 
-The skeleton is what goes on the board; the walkthrough is what gets said,
-segment by segment, with the transition sentence between segments — which is
-where a delivery actually stalls.
+The bullets are what goes on the board; the talk is what gets said, segment
+by segment, with the transition sentence between segments — which is where an
+explanation actually stalls.
 
 ## Document shape
 
-Fixed by the first document and followed by the rest, so that revision is
+Fixed by the first document and followed by the rest, so that revising is
 scanning a column rather than re-reading prose. See
 [TEMPLATE.md](TEMPLATE.md).
 
-The two sections that do the most work are the last ones. **Expected follow-ups**
-is where most preparation stops too early: almost everyone rehearses the happy
-path and falls apart on the first push. **What to build first** forces a claim
-about which part is load-bearing, which is the question a senior interviewer is
-actually asking.
+The two sections that do the most work are the last ones. **Questions the
+design has to survive** is where most write-ups stop too early: almost
+everyone works out the happy path and has nothing for the first hard push.
+**What to build first** forces a claim about which part is load-bearing, which
+is the question worth being able to answer about any system.
+
+## Where the numbers come from
+
+Several designs lean on measurements rather than estimates: decode and prefill
+rates on a 27B FP8 model under vLLM, the cold/warm prefix-cache gap on a 53K
+token prompt, run-length spread on a single coding task, how often an
+identically reconstructed agent state reproduces its next actions, and how
+often a model call had to be re-sampled because of transport failures. They
+come from the experiments in
+[AgentSeism](https://github.com/lyr-ai/agentseism), and the write-ups of
+those experiments are at [lyr-ai.github.io](https://lyr-ai.github.io).

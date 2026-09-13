@@ -40,7 +40,7 @@ GPU Replica Pool
 
 **Part 1** covers the workload model and why this is not a web serving problem.
 Everything after — routing, autoscaling, fairness, cost — depends on getting
-this part right, and most weak answers go wrong here rather than later.
+this part right, and most designs go wrong here rather than later.
 
 ---
 
@@ -192,7 +192,7 @@ decode step, decode step, [ 30k-token prefill ], decode step, ...
 This is why **chunked prefill** exists: split a long prompt into pieces and
 interleave them with decode steps, trading a little TTFT for the long request to
 protect TPOT for everyone else. It is a scheduling decision inside the engine,
-and being able to name it is a strong signal.
+and worth knowing by name.
 
 ---
 
@@ -687,7 +687,7 @@ cost                 tokens, GPU-hours, and which one the bill is in
 agent traffic        the specific shape it has, and why it is the good case
 ```
 
-Remaining, and none of it is load-bearing for the interview:
+Remaining, and none of it is load-bearing for the design:
 
 ```text
 speculative decoding     throughput at the cost of complexity
@@ -701,8 +701,8 @@ LoRA multiplexing        many fine-tunes on shared base weights
 decode is bandwidth-bound, running them on the same device forces one
 compromise for both. Splitting them into separate pools, with KV transferred
 between, lets each be sized and scaled for its own bottleneck — at the cost of
-moving tens of gigabytes per request across the fabric. Naming it as the logical
-endpoint of §3 is a good closing move.
+moving tens of gigabytes per request across the fabric. It is the logical endpoint
+of §3, and the right place to stop.
 
 ---
 
@@ -806,7 +806,7 @@ A, 13 sequences at long context  →  perhaps ~35 tok/s per sequence
 
 **Illustrative estimate, not measured.** `13 × 50K` decode was never benchmarked
 on this deployment, and presenting a guess as a derived number is the fastest way
-to lose an interviewer who has.
+to lose anyone who has.
 
 ### There is no universally optimal answer
 

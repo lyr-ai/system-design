@@ -13,9 +13,9 @@ Four questions, and nothing else. Everything here exists to answer one of them.
 4  Strong isolation and a two-second start — how do you get both?
 ```
 
-**What is being tested.** Whether you can name a threat model and design to it,
-rather than reciting three container technologies. The fourth question is where
-most answers collapse, because they assume isolation and speed trade against
+**The point.** Naming a threat model and designing to it, rather than reciting
+three container technologies. The fourth question is where most designs
+collapse, because they assume isolation and speed trade against
 each other. Mostly they do not.
 
 ---
@@ -107,7 +107,7 @@ no nested virtualisation needed
 ```
 
 **Do not claim one is universally correct.** Naming the axis that decides —
-compatibility against density — is the signal; picking a side without one is not.
+compatibility against density — is the point; a side picked without one is not.
 
 ---
 
@@ -247,7 +247,7 @@ latency.
 
 ---
 
-## 5. Rehearsal — answer each in 60 seconds
+## 5. Questions to check understanding
 
 1. What is the threat model for a coding agent's sandbox? Say it in one sentence.
 2. Why can seccomp not do the job here, specifically?

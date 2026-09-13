@@ -5,8 +5,8 @@
 > the lease decides **how fast a failure is noticed**, the checkpoint decides
 > **how much is lost** when it is.
 
-**What is being tested.** Whether you understand that a checkpoint is a
-*consistency boundary*, not a backup. Most candidates describe saving files.
+**The point.** A checkpoint is a *consistency boundary*, not a backup. Most
+descriptions stop at saving files.
 The interesting questions are all about what makes a saved state legitimate to
 resume from.
 
@@ -56,8 +56,7 @@ reproduction script, reads it back, and is told the file does not exist.
 
 ## 2. Resume is not restart-from-state
 
-Worth volunteering, because it shows you have thought about semantics rather
-than mechanics.
+Worth stating, because it is a question of semantics rather than mechanics.
 
 An agent crashes at step 50. Restore
 
@@ -80,10 +79,10 @@ somewhere else. So a checkpoint has to declare **which semantics it offers**:
 |---|---|---|
 | restart from state | the repository | a fresh attempt on the same code |
 | resume | repository + context + budgets | continuation of the same execution |
-| replay | everything, plus recorded outputs | the same trajectory — see §12 |
+| replay | everything, plus recorded outputs | the same trajectory — see §16 |
 
-Do not use these three words interchangeably in an interview. The follow-up
-*"so is it exactly the same run?"* is coming, and §12 is the answer.
+Do not use these three words interchangeably. The question *"so is it exactly
+the same run?"* follows immediately, and §16 is the answer.
 
 ---
 
@@ -215,7 +214,7 @@ covers most of the same ground:
 > atomic write.
 
 The same shape appears in filesystem journals, in Git (objects then ref), and in
-object-store table formats. Naming that lineage is a cheap credibility signal.
+object-store table formats. That lineage is worth knowing.
 
 ---
 
@@ -304,7 +303,7 @@ a little on every step.
 
 ## 8. What cannot be checkpointed
 
-Being able to list this is a stronger signal than describing what can.
+Listing this is more useful than describing what can.
 
 | state | checkpointable? | approach |
 |---|---|---|
@@ -348,8 +347,8 @@ checkpoint overhead ∝ 1/T
 ```
 
 One term rises with `T`, the other falls, so a balance exists. **Do not derive
-the optimum in an interview** — stating the shape of the tradeoff is the answer;
-producing a formula is a distraction from the part that is actually judged.
+the optimum** — the shape of the tradeoff is what matters; the formula depends
+on a failure rate nobody knows in advance.
 
 With content addressing the second term is much smaller than it looks, which
 pushes the answer toward *frequently*.
@@ -374,7 +373,7 @@ treat the compacted transcript as a new log rather than an append to the old one
 
 ## 10. Checkpointing does not make side effects transactional
 
-The limit of everything above, and worth stating before an interviewer finds it.
+The limit of everything above.
 
 ```text
 checkpoint C
@@ -435,7 +434,7 @@ irreproducible**, and notice that B is only safe because the tool is in the
 
 ## 12. Could a VM snapshot replace all of this?
 
-A likely challenge, especially once Firecracker is on the whiteboard: freeze
+A natural challenge once Firecracker is in the picture: freeze
 memory and VM state and the problem disappears.
 
 **What it buys**
@@ -607,8 +606,8 @@ the first and fails the second, and that is precisely the defect §1 warns about
 
 ## 16. What resume guarantees, and what it does not
 
-The senior version of this question, and it is worth being precise rather than
-reassuring.
+The version of this question worth answering precisely rather than
+reassuringly.
 
 Restoring state restores **the starting point**. It does not restore **the
 future**, because the next model call is a fresh sample from a system that is
@@ -663,8 +662,8 @@ months ago carries a token that was valid three months ago. Restore it and the
 token is live again, in a workspace nobody is watching. Re-mint on resume from
 the secret manager — the checkpoint stores a *reference*, never a secret.
 
-That dedup-versus-isolation tension is a good thing to raise unprompted. It is a
-real tradeoff and most answers never notice it exists.
+That dedup-versus-isolation tension is worth raising. It is a real tradeoff and
+most designs never notice it exists.
 
 ---
 
@@ -734,7 +733,7 @@ restore                   base blob + ≤ N deltas, N bounded by re-basing
 
 ---
 
-## 21. Rehearsal — answer each in 60 seconds
+## 21. Questions to check understanding
 
 1. What is a checkpoint, if not a workspace snapshot?
 2. Why is a half-written checkpoint worse than no checkpoint?
@@ -1078,8 +1077,8 @@ the attempt:
 "step 120 → step 100"      the same number pretending to be monotonic
 ```
 
-The second is the one to avoid, and noticing it before the interviewer does is
-the point of this section.
+The second is the one to avoid, and noticing it before a user does is the
+point of this section.
 
 ---
 

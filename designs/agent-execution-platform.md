@@ -7,7 +7,7 @@ The concrete case is a coding agent: a user submits a task and a repository, the
 agent works in a sandbox for minutes to hours, calling an LLM, running shell
 commands, editing files and running tests. Thousands run at once.
 
-**The framing that decides the whole interview:** this is a distributed
+**The framing that decides everything else:** this is a distributed
 execution system whose workload happens to be an agent. Do not open with fifteen
 minutes about LLMs.
 
@@ -238,8 +238,7 @@ Telemetry / Event Pipeline
 
 ## 6. Control plane vs data plane
 
-Practise this until it is automatic; it is one of the strongest signals in the
-whole answer.
+The split that most of the failure story depends on.
 
 | | control plane | data plane |
 |---|---|---|
@@ -373,12 +372,12 @@ A job may briefly be executed twice — the classic case is a worker that is
 alive but partitioned, still working, while its lease expires. So the runtime
 must be built for **idempotency**, not for exactly-once.
 
-Say this directly in the interview:
+Say it directly:
 
 > I'd prefer at-least-once execution with idempotent lifecycle operations rather
 > than building exactly-once distributed execution semantics.
 
-Then add the part most candidates miss, because it is specific to this workload:
+Then the part that is easy to miss, because it is specific to this workload:
 at-least-once interacts badly with a stochastic runtime. §18.
 
 ---
@@ -401,7 +400,7 @@ untrusted arbitrary code     →  Firecracker-like microVM
 ```
 
 **Do not claim one option is universally right.** Naming the tradeoff is the
-signal; picking a side without one is not.
+point; a side picked without one is not.
 
 ### Meeting the startup budget
 
@@ -654,8 +653,8 @@ decode          220 × 800     ≈ 176K tokens/s
 
 **Prefix caching is load-bearing, not an optimisation.** The agent resends its
 whole transcript every step, so without it prefill is quadratic in trajectory
-length and the cluster is fifteen times larger. If you say one number in this
-interview, say this one.
+length and the cluster is fifteen times larger. If one number in this design is
+worth remembering, it is this one.
 
 It follows that the model gateway must **route for cache affinity** — send a
 job's successive calls to the replica that already holds its prefix. Random
@@ -812,7 +811,7 @@ continue the best branch
 
 ---
 
-## 22. Pacing the 45 minutes
+## 22. Telling it in 45 minutes
 
 ```text
 0–5     requirements + scale
@@ -829,9 +828,7 @@ system** whose workload happens to be an agent.
 
 ---
 
-## 23. Expected follow-ups
-
-Prepare these ten cold.
+## 23. Questions the design has to survive
 
 1. **Why not just Kubernetes Jobs?** Pod lifecycle assumes short, restartable
    work; no checkpoint story for a stateful hours-long workspace; the sandbox

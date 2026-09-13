@@ -1,6 +1,6 @@
 # System Design #N — <Title>
 
-> **<The question, in the words the interviewer would use.>**
+> **<The question this design answers, in one sentence.>**
 
 <Two or three sentences of the concrete case. Then the framing sentence: what
 kind of system this really is, so the answer does not drift into the wrong one.>
@@ -43,7 +43,7 @@ and say it plainly.
 
 ## 18. Failure modes
 A table, plus one failure worth dwelling on — ideally one you have actually
-seen, which is what separates a memorised answer from a lived one.
+seen, which is what separates a lesson from a summary.
 
 ## 19–20. Cost and tradeoffs
 Tradeoff table: decision · chosen · given up · when you would choose otherwise.
@@ -52,11 +52,12 @@ Tradeoff table: decision · chosen · given up · when you would choose otherwis
 Where this touches your own work, arriving as a consequence of the design rather
 than as a detour.
 
-## 22. Pacing
-Minute ranges for the 45 minutes, and the one opening mistake to avoid.
+## 22. Telling it in one sitting
+The order to explain it in, rough time per part, and the one opening mistake
+to avoid. If it cannot be told in 45 minutes, it is not understood yet.
 
-## 23. Expected follow-ups
-Ten questions, cold, with answers. This is the section that decides the outcome.
+## 23. Questions the design has to survive
+Ten questions, with answers. Writing them is where the gaps show up.
 
 ## 24. What to build first
 One or two pieces, with the reason: what is painful to change later.

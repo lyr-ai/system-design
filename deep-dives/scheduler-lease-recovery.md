@@ -2,12 +2,11 @@
 
 > Belongs to [System Design #1](../designs/agent-execution-platform.md), §8 §9 §18.
 
-The interviewer points at the Scheduler box and asks *why*, *what if it fails*,
-and *what happens at 100×*.
+Point at the Scheduler box and ask *why*, *what if it fails*, and *what happens
+at 100×*.
 
-**What is being tested.** Not whether you know the word "lease". Whether you can
-derive it — because the derivation is what you have to reproduce at a whiteboard,
-and a memorised conclusion collapses on the second follow-up.
+**The point** is not the word "lease" but the derivation. A conclusion that was
+remembered rather than derived collapses on the second question.
 
 So this document is built as the derivation: the naive design, what breaks, the
 fix, what breaks next.
@@ -78,7 +77,7 @@ flowchart LR
 | **Queue** | what is waiting | ordering and readiness, nothing authoritative |
 | **Scheduler** | the decision | which job goes to which worker, and when to take it back |
 
-Conflating them is the most common structural mistake in this answer. In
+Conflating them is the most common structural mistake in this design. In
 practice the queue is often a view over the store (§6), but the *roles* stay
 distinct: one is truth, one is order, one is policy.
 
@@ -419,7 +418,7 @@ wastefully; it **branches the trajectory**.
 Consequences:
 
 - Resume from a checkpoint is a *continuation*, not a replay. Never describe it
-  as replay in the interview; it will not survive the follow-up.
+  as replay; the distinction does not survive the first hard question.
 - The trajectory must record which steps were retried, or users cannot account
   for their own runs.
 - Deduplication keys can be derived neither from a hash of the model's output,
@@ -709,7 +708,7 @@ jobs; let running ones finish, because they hold the expensive state.
 
 ## 15. "Why not the Kubernetes scheduler?"
 
-Very likely to be asked. The answer that fails is *Kubernetes is not good
+The obvious question. The answer that fails is *Kubernetes is not good
 enough*. The answer that works:
 
 > I would probably use Kubernetes as part of the underlying resource substrate,
@@ -740,8 +739,8 @@ Kubernetes           bin-packing pods onto nodes
 Node / sandbox
 ```
 
-This is a considerably more mature answer than proposing to replace Kubernetes,
-and it is also what real platforms do.
+This is considerably more mature than proposing to replace Kubernetes, and it
+is also what real platforms do.
 
 ---
 
@@ -789,7 +788,7 @@ concurrency — sizing it to concurrency buys a fleet of idle VMs.
 
 **Raw sandbox capacity** is the answer people reach for and it is the least
 interesting: it scales by adding hosts, which is the easy axis. Saying so — and
-naming the others instead — is the differentiator.
+naming the others instead — is what matters.
 
 ---
 
@@ -849,7 +848,7 @@ before they are asked.
 > **"A worker running a two-hour coding agent stops heartbeating. Walk me
 > through exactly what happens."**
 
-Aim for this, in your own words rather than memorised:
+Said in one go:
 
 > Each running execution holds a time-bounded lease, which the worker renews
 > while it executes. If heartbeats stop and the lease expires, the control plane
@@ -868,8 +867,8 @@ Aim for this, in your own words rather than memorised:
 
 The load-bearing sentence is the second one in the first paragraph: **the
 execution is lost, the job is not.** It is why the data model separates them
-(§design 1 §4) and it is the phrase that signals you have thought about this
-rather than read about it.
+(§design 1 §4) and it is the phrase that shows the thing has been thought about
+rather than read about.
 
 ---
 
@@ -985,7 +984,7 @@ loop entirely (§4 above), not to add another protocol inside it.
 
 ---
 
-## 21. Rehearsal — answer each in 60 seconds
+## 21. Questions to check understanding
 
 1. Why a lease rather than assignment with acknowledgement?
 2. Your lease expired but the worker is alive and still running. What happens?
@@ -1005,7 +1004,7 @@ loop entirely (§4 above), not to add another protocol inside it.
 15. A third-party effect supports neither idempotency nor transactions. Now what?
 16. Is self-fencing a correctness mechanism? Defend the answer.
 
-If all ten come out fluently, this section is done. Move to the next deep dive
+If these come out fluently, this section is done. Move to the next deep dive
 rather than polishing this one.
 
 ---

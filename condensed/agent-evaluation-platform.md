@@ -1,7 +1,9 @@
-# Whiteboard — Agent Evaluation and Experimentation Platform
+# Condensed — Agent Evaluation and Experimentation Platform
 
-> The 45-minute version of [design #3](../designs/agent-evaluation-platform.md).
-> Only what to say unprompted. Section numbers point back at the full text.
+> [Design #3](../designs/agent-evaluation-platform.md) in two pages: what to
+> say when explaining it in one sitting, in order, with section numbers
+> pointing back at the full text. If it cannot be told from this page, the
+> full text has not been understood yet.
 
 ---
 

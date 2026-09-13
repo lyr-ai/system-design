@@ -1,13 +1,13 @@
-# Walkthrough — Agent Evaluation and Experimentation Platform
+# Talk — Agent Evaluation and Experimentation Platform
 
-> The spoken version of [design #3](../designs/agent-evaluation-platform.md),
-> paced to 45 minutes. Not to be memorised word for word. What to keep is, per
-> segment, the **transition**, the **invariant**, and the **tradeoff** — the
-> three things an interviewer is listening for. Blocks marked *write* go on the
-> board; everything else is said.
+> [Design #3](../designs/agent-evaluation-platform.md) as it would be explained
+> to someone, in 45 minutes. Not to be memorised word for word. What to keep
+> is, per segment, the **transition**, the **invariant**, and the **tradeoff**
+> — the three things a listener needs. Blocks marked *write* go on the board;
+> everything else is said.
 >
-> Pairs with the [skeleton](agent-evaluation-platform.md), which is the same
-> thing as bullets.
+> Pairs with the [condensed page](agent-evaluation-platform.md), which is the
+> same thing as bullets.
 
 ---
 
@@ -34,7 +34,7 @@
 > And what does "safe to ship" include — success rate only, or latency, cost,
 > safety, reliability as well?
 
-Then assume out loud, so the interviewer can redirect:
+Then assume out loud, so a listener can push back:
 
 > I'll assume: mostly one-axis changes but bundling happens; most tasks have
 > deterministic verifiers with a judged minority; environments can be
@@ -49,7 +49,7 @@ Then the framing — the one sentence to keep:
 > block or investigate decision with confidence and evidence attached** — not
 > a score.
 
-Stop. Let them answer. Keep the whole segment under three minutes; the
+Stop and let them answer. Keep the segment under three minutes; the
 clarifications earn their time only because each one changes the architecture.
 
 ---
