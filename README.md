@@ -25,9 +25,10 @@ one reuses the vocabulary the previous one established.
 | 4 | Secure sandbox service for untrusted code | — | the Sandbox box |
 | 5 | Agent checkpoint / replay / debugging | — | the Checkpoint + Event boxes |
 
-`state` is one of `outline` · `drafted` · `condensed` — the last meaning the
-design also exists as a two-page version that can be explained from memory,
-which is the test of whether it has actually been understood.
+`state` is one of `outline` · `drafted` · `condensed` — the last meaning a
+two-page version exists **and** the design can be explained from it without
+the full notes. Having the page is not the state; being able to give the
+explanation is, which is why #3 has a condensed page and is still `drafted`.
 
 ## Deep dives
 

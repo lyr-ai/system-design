@@ -94,9 +94,10 @@ cost accounting per experiment
 > against a pinned environment snapshot, release-blocking with a 12-hour
 > wall-clock target, and a reproduction window of 30 days.
 
-The paired assumption is worth defending immediately: it is the single
-cheapest way to buy statistical power, and it is what makes environment
-pinning non-negotiable rather than nice-to-have.
+The paired assumption is worth defending immediately: pairing is often one of
+the cheapest ways to buy statistical power when task outcomes are strongly
+correlated across arms, and it is what makes environment pinning
+non-negotiable rather than nice-to-have.
 
 ---
 
