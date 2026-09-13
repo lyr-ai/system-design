@@ -13,9 +13,11 @@ and from the questions that came up doing so.
 
 ## The series
 
-Five designs that compose. The first is the whole picture; the rest are deep
+Six designs that compose. The first is the whole picture; #2–#5 are deep
 dives into one box of it, which is why they are worth reading in order — each
-one reuses the vocabulary the previous one established.
+one reuses the vocabulary the previous one established. #6 is the branch
+upstream of all of them: how a model gets made before #2 serves it, and where
+the RL loop turns the other five into a training system.
 
 | # | design | state | it deep-dives |
 |---|---|---|---|
@@ -24,6 +26,7 @@ one reuses the vocabulary the previous one established.
 | 3 | [Agent evaluation and experimentation platform](designs/agent-evaluation-platform.md) | drafted | what runs on top of #1 and #2 |
 | 4 | [Secure sandbox service for untrusted code](designs/secure-sandbox-service.md) | drafted | the Sandbox box, as a service #1 calls |
 | 5 | [Agent checkpoint, replay and debugging](designs/agent-checkpoint-replay-debugging.md) | drafted | the Checkpoint + Event boxes, and what runs on them |
+| 6 | [Post-training and fine-tuning platform](designs/post-training-platform.md) | drafted | what happens before a model reaches #2 |
 
 `state` is one of `outline` · `drafted` · `condensed` — the last meaning a
 two-page version exists **and** the design can be explained from it without
@@ -48,7 +51,7 @@ that point stop polishing and start the next design.
 | [Checkpoint and resume](deep-dives/checkpoint-resume.md) | #1 §12 | drafted |
 | [Sandbox and isolation](deep-dives/sandbox-isolation.md) | #1 §10 §11 | drafted |
 | Control/data plane and the failure model | #1 §6 §18 | — |
-| Capacity with a shared GPU pool | #1 §8 §17 | — |
+| Capacity with a shared GPU pool | #1 §8 §17 | covered by #6 §9 |
 
 ## Condensed versions
 
