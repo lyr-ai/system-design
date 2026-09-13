@@ -47,9 +47,13 @@ The step from `drafted` to `whiteboard`: the same design compressed to what
 gets said unprompted in 45 minutes, with section pointers back to the full
 text. Two pages, no new content.
 
-| skeleton | of |
-|---|---|
-| [Agent evaluation and experimentation platform](whiteboard/agent-evaluation-platform.md) | #3 |
+| skeleton | walkthrough | of |
+|---|---|---|
+| [bullets](whiteboard/agent-evaluation-platform.md) | [spoken, with transitions](whiteboard/agent-evaluation-platform-walkthrough.md) | #3 |
+
+The skeleton is what goes on the board; the walkthrough is what gets said,
+segment by segment, with the transition sentence between segments — which is
+where a delivery actually stalls.
 
 ## Document shape
 
