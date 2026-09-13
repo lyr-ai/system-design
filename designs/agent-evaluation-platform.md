@@ -80,7 +80,7 @@ cost accounting per experiment
 |---|---|
 | What varies between candidate and baseline — model only, or harness/prompt/tools too? | the candidate identity schema, and whether one-axis-at-a-time attribution is possible |
 | Are tasks verifiable (tests, state assertions) or judged? | whether an LLM judge is a fallback or the primary oracle — changes the grading plane entirely |
-| Is the comparison paired — same task, same environment snapshot, both arms? | halves the sample size needed; forces environment pinning |
+| Is the comparison paired — same task, same environment snapshot, both arms? | usually a large gain in power, because task difficulty cancels; forces environment pinning |
 | Fixed trials per task, or adaptive? | scheduler complexity against 3–5× less compute |
 | Does the eval block a release? | a wall-clock SLO on the whole suite, and priority over other experiments |
 | Is inference shared with production? | capacity contention and interference; evaluation is burstier than production |
@@ -381,10 +381,13 @@ attempts exhausted    trial → CENSORED, reason recorded
 
 Why *from scratch* rather than resume-from-checkpoint, given #1 built the
 machinery? Because a resumed trial has a retried model call in it, and a
-retried model call is a new sample (#1 §18). For production that is
-acceptable; for an experiment it is a trajectory that is neither the first
-sample nor an independent second one. Restart cleanly, count the attempt, and
-cap it. §9.
+retried model call is a new sample (#1 §18). The result is a trajectory that
+is neither the first sample nor an independent second one. Restart cleanly,
+count the attempt, and cap it.
+
+That is the default, not a law — restart versus resume changes *which
+distribution is being sampled*, and the right choice follows from what the
+experiment is estimating. §9.
 
 ---
 
@@ -569,12 +572,24 @@ be a longer-running but better agent, or a looping one — and the platform
 cannot tell, so it must not fold it into either "pass" or "fail". A failed run
 is not an agent failure until the failure has been classified.
 
-### Restart, not resume
+### Restart or resume: it depends on the estimand
 
-Restated from §7 because it is the follow-up that comes: resume-from-checkpoint
-is for production continuity. An experiment wants either the original sample or
-a clean new one. Restart the attempt from scratch, count it, cap it at three,
-censor beyond that.
+The follow-up that comes: *a three-hour trial dies at minute 179 — you really
+throw away three hours?* Do not defend the default; name what is being
+estimated.
+
+| the experiment estimates | on attempt loss | why |
+|---|---|---|
+| clean end-to-end success probability of the agent | **restart** | a resumed run contains a re-sampled step; it is neither the original draw nor an independent one |
+| success probability of the *production system*, recovery included | **resume** | recovery is part of the thing being measured; restarting would hide it |
+| behaviour conditioned on a recorded state S | **fork / resume is the experiment** | the continuation from S is the object of study, and it is labelled as such by lineage |
+
+> Restart versus resume is not a reliability preference. It changes which
+> distribution the trial is a sample from, so it is declared per experiment,
+> recorded per trial, and never mixed within one comparison.
+
+For the default release comparison — the first row — restart from scratch,
+count the attempt, cap at three, censor beyond that.
 
 ### Grading is a DAG stage, not a loop step
 
@@ -670,8 +685,36 @@ tasks where baseline passes and candidate fails    b
 ```
 
 Only `a` and `b` carry information; tasks where both pass or both fail cancel.
-A sign test or McNemar on `(a, b)` is enough, and it needs far fewer tasks than
-comparing two unpaired rates — which is the reason to insist on pairing in §2.
+A sign test or McNemar on `(a, b)` is enough, and it can need materially fewer
+tasks than comparing two unpaired rates — the gain is largest when outcomes are
+strongly correlated within a task, which for a suite with wide difficulty
+variation they are. That is the reason to insist on pairing in §2, stated with
+its condition.
+
+### Two levels of sampling, and which trial pairs with which
+
+*If the agent is stochastic, what pairs with what?* The honest structure is
+nested:
+
+```text
+Task i
+ ├── baseline    trial 1 … trial K   →  p̂_base(i)
+ └── candidate   trial 1 … trial K   →  p̂_cand(i)
+
+per-task difference   d_i = p̂_cand(i) − p̂_base(i)
+release metric        mean of d_i over tasks
+```
+
+Trials are nested within tasks. The unit that pairs is the **task**, on its
+per-arm pass-rate estimate — not trial 3 of one arm against trial 3 of the
+other, which share nothing but an index. With K = 1 this collapses to the
+discordant-pair test above; with K > 1 the test is on the `d_i`, and the
+within-task trials only sharpen each `p̂`.
+
+The sentence to say: **NK trials are not NK independent task samples.**
+Pretending they are shrinks the interval by √K for free, and the free part is
+the bug — it is the same mistake as counting forked trajectories as
+independent, one level up.
 
 ### Effective N is a lineage computation
 
@@ -870,8 +913,15 @@ are how the suite fits at all. At one trial per task plus adaptive top-up on
 ~15% of tasks:
 
 ```text
-200K + 2 × 0.15 × 100K × 4  ≈  320K trials  ≈  160K agent-hours  ≈  16 h
+100K tasks × 2 arms × 1 trial           =  200K trials     first sample
+~15% of tasks uncertain after it        =   15K tasks
+15K × 2 arms × 4 more trials            =  120K trials     top-up
+                                           ──────────
+                                           320K trials  ≈  160K agent-hours  ≈  16 h
 ```
+
+Draw it in that order at the whiteboard — first sample, uncertain fraction,
+top-up — rather than producing the formula.
 
 Still over. Either the window moves, capacity is reserved for release runs, or
 the release-blocking suite is a stratified 50K. Say which, and say it is a
@@ -987,7 +1037,7 @@ they were paid for, and the reliability dimension needs the number.
 
 | decision | chosen | given up | choose otherwise when |
 |---|---|---|---|
-| restart, not resume, on attempt loss | clean samples | #1's checkpoint machinery for evals | trials are hours long and loss dominates |
+| restart on attempt loss (default) | clean samples | #1's checkpoint machinery for evals | the estimand includes recovery, or the continuation *is* the experiment (§9) |
 | paired design | ~half the sample size | environment pinning effort | environments cannot be snapshotted |
 | adaptive trials | 3–5× compute | simpler statistics; equal K everywhere | per-task variance is the object of study |
 | verifier over judge | deterministic truth | coverage of tasks with no verifier | the task is genuinely open-ended |
@@ -1070,7 +1120,8 @@ Prepare these ten cold.
 6. **How do retries bias the experiment?** A retried attempt is not a second
    sample — `trial_id` is the primary key. A retried *model call* inside a
    trial is a new sample of that step — flag it, report the rate, stop if it
-   rises. Restart attempts from scratch rather than resume. §9.
+   rises. Restart attempts from scratch rather than resume — unless the
+   estimand includes recovery, in which case say so and resume. §9.
 7. **Judge disagrees with the unit tests. Which wins?** The verifier. The
    disagreement is routed as a signal about the judge or the test, and the
    anchor set tells you which. §10.
@@ -1094,7 +1145,30 @@ Prepare these ten cold.
 The **trial identity and lineage schema** — `trial_id` as the result's
 primary key, attempts distinct from trials, `censored` as a status with a
 reason, and the lineage fields — and the **separation of grades from
-trials**. Everything else can start as a script that submits jobs to #1 and
-tallies a spreadsheet. Those two are the pieces that, once a hundred
-experiments have been run on top of them, cannot be changed without invalidating
-every comparison made so far.
+trials**. Those two are the pieces that, once a hundred experiments have been
+run on top of them, cannot be changed without invalidating every comparison
+made so far.
+
+*Two engineers, six weeks — what ships?*
+
+```text
+V0
+versioned Task / Candidate / Experiment
+      ↓
+paired trial planner, fixed K
+      ↓
+submit to the existing agent runtime (#1)
+      ↓
+deterministic verifiers only
+      ↓
+append-only Trial + Grade, censoring classified
+      ↓
+paired regression report: difference, interval, N, censored per arm
+```
+
+Deferred, deliberately: the LLM-judge platform, adaptive sampling, the human
+queue, sequential statistics, automatic attribution. The first thing to prove
+is not that sophisticated evaluation infrastructure can be built. It is that
+**a candidate change can enter one door and come out as a ship/block decision
+someone is willing to act on.** Everything deferred makes that decision
+cheaper or broader; none of it makes it trustworthy.

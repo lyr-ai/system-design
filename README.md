@@ -41,6 +41,16 @@ notes. At that point stop polishing and start the next design.
 | Control/data plane and the failure model | #1 §6 §18 | — |
 | Capacity with a shared GPU pool | #1 §8 §17 | — |
 
+## Whiteboard skeletons
+
+The step from `drafted` to `whiteboard`: the same design compressed to what
+gets said unprompted in 45 minutes, with section pointers back to the full
+text. Two pages, no new content.
+
+| skeleton | of |
+|---|---|
+| [Agent evaluation and experimentation platform](whiteboard/agent-evaluation-platform.md) | #3 |
+
 ## Document shape
 
 Fixed by the first document and followed by the rest, so that revision is
