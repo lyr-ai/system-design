@@ -13,7 +13,7 @@ reuses the vocabulary the previous one established.
 |---|---|---|---|
 | 1 | [Agent Execution Platform](designs/agent-execution-platform.md) | drafted | — the whole system |
 | 2 | [Multi-tenant LLM inference platform](designs/llm-inference-platform.md) | drafted | the Model Service box |
-| 3 | Large-scale agent evaluation platform | — | what runs on top of #1 |
+| 3 | [Agent evaluation and experimentation platform](designs/agent-evaluation-platform.md) | drafted | what runs on top of #1 and #2 |
 | 4 | Secure sandbox service for untrusted code | — | the Sandbox box |
 | 5 | Agent checkpoint / replay / debugging | — | the Checkpoint + Event boxes |
 
