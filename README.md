@@ -50,8 +50,11 @@ that point stop polishing and start the next design.
 | [Scheduler, lease, failure recovery](deep-dives/scheduler-lease-recovery.md) | #1 §8 §9 §18 | drafted |
 | [Checkpoint and resume](deep-dives/checkpoint-resume.md) | #1 §12 | drafted |
 | [Sandbox and isolation](deep-dives/sandbox-isolation.md) | #1 §10 §11 | drafted |
-| Control/data plane and the failure model | #1 §6 §18 | — |
+| Control/data plane and the failure model | #1 §6 §18 | not written — used throughout #1–#6 instead |
 | Capacity with a shared GPU pool | #1 §8 §17 | covered by #6 §9 |
+
+The scope is frozen at this point: six designs and three deep dives. What
+remains is `drafted → condensed` for each, not more text.
 
 ## Condensed versions
 
@@ -90,3 +93,10 @@ often a model call had to be re-sampled because of transport failures. They
 come from the experiments in
 [AgentSeism](https://github.com/lyr-ai/agentseism), and the write-ups of
 those experiments are at [lyr-ai.github.io](https://lyr-ai.github.io).
+
+The post-training design is different: its memory, compute, checkpoint and
+interconnect numbers are back-of-the-envelope capacity estimates from standard
+hardware and training-system assumptions, not measurements. They are there to
+make the design constraints concrete — `27B × 16 B/param ≈ 430 GB` matters
+because it rules out replicated state, not because any framework uses exactly
+that — and the assumptions are stated beside each calculation.
